@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
   }
   
 
-
+  //This allows for multiple clients to connect to the server one after another. The server will handle one client at a time in a sequential manner. After a client disconnects, the server goes back to waiting for the next client to connect.
   while (true) {
 
     struct sockaddr_in client_addr; // holds connected client address information
@@ -86,8 +86,10 @@ int main(int argc, char **argv) {
     std::cout << "Client connected\n";
 
     // 2. Loop to handle multiple commands from THIS specific client
+    //buffer to hold the incoming data from the client, we will read into this buffer and then process the commands. The size of 1024 is arbitrary and can be adjusted based on expected command sizes.
     char buffer[1024];
     while (true) {
+      //blocking call that waits for the client to send data, reads the data into the buffer and returns the number of bytes received. If the client disconnects, recv() will return 0 or a negative value, which we can use to break out of the loop and wait for the next client.
         ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
         
         if (bytes_received <= 0) {
