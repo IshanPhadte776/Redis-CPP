@@ -16,6 +16,8 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
+#include <queue>
+#include <chrono>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -24,8 +26,25 @@
 
 #include "respparser.h"
 
+struct Node {
+    std::string value;
+    std::chrono::steady_clock::time_point expires_at; // Time point when the key expires
+    bool hasTTL = false
+}
 
-std::unordered_map<std::string, std::string> key_value_store; // In-memory key-value store
+struct ExpiryEntry {
+    std::string key;
+    std::chrono::steady_clock::time_point expires_at;
+
+  bool operator<(const ExpiryEntry& other) const {
+        // We want the earliest expiry time to have the highest priority (i.e., be at the top of the priority queue)
+        return expires_at > other.expires_at; // Reverse order for min-heap behavior
+    }
+
+};
+
+std::unordered_map<std::string, Node> key_value_store; // In-memory key-value store
+std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEntry>> expiry_heap;
 std::mutex store_mutex;
 
 void handle_client(int client_fd) {
@@ -68,9 +87,50 @@ void handle_client(int client_fd) {
                 std::string key = request.elements[1].bulkString;
                 std::string value = request.elements[2].bulkString;
 
-                {
+                Node newNode;
+                newNode.value = value;
+                newNode.hasTTL = false; // By default, no TTL
+
+                if (request.elements.size() >= 5){
+                  std:string flag = request.elements[3].bulkString;
+                  long long duration_ms = 0;
+                  bool valid_ttl = false;
+
+                  try {
+                    if (flag == "EX") {
+                        // Seconds to Milliseconds
+                        duration_ms = std::stoll(request.elements[4].bulkString) * 1000;
+                        valid_ttl = true;
+                    } else if (flag == "PX") {
+                        // Already Milliseconds
+                        duration_ms = std::stoll(request.elements[4].bulkString);
+                        valid_ttl = true;
+                    }
+                  } catch (...) {
+                      // Handle cases where the duration isn't a valid number
+                      const char* err = "-ERR value is not an integer or out of range\r\n";
+                      send(client_fd, err, strlen(err), 0);
+                      continue; 
+                  }
+
+                  if (valid_ttl) {
+                      newNode.hasTTL = true;
+                      newNode.expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms);
+
+                      // Add to the expiry heap
+                      ExpiryEntry entry{key, newNode.expires_at};
+                      {
+                          std::lock_guard<std::mutex> lock(store_mutex);
+                          expiry_heap.push(entry);
+                      }
+                  }
+
+                }
+                
+                
+                else {
                     std::lock_guard<std::mutex> lock(store_mutex);
-                    key_value_store[key] = value;
+                    key_value_store[key] = newNode;
                 }
 
                 const char* ok = "+OK\r\n";
@@ -109,6 +169,29 @@ void handle_client(int client_fd) {
 
     // 4. Clean up this client and wait for the next one
     close(client_fd);
+}
+
+void background_cleanup() {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Check 10 times a second
+
+        auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(kv_mutex);
+
+        while (!expiry_heap.empty() && expiry_heap.top().time <= now) {
+            std::string key_to_expire = expiry_heap.top().key;
+            
+            // Double check: Did the key get updated with a new TTL since it was added to the heap?
+            if (kv_store.count(key_to_expire) && 
+                kv_store[key_to_expire].has_ttl && 
+                kv_store[key_to_expire].expires_at <= now) {
+                
+                kv_store.erase(key_to_expire);
+                std::cout << "Key [" << key_to_expire << "] expired and removed.\n";
+            }
+            expiry_heap.pop();
+        }
+    }
 }
 
 int main(int argc, char **argv) {
