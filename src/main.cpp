@@ -144,7 +144,7 @@ void handle_client(int client_fd) {
                     std::lock_guard<std::mutex> lock(store_mutex);
                     if (key_value_store.count(key)) {
                         Node& node = key_value_store[key];
-                        if (node.has_ttl && std::chrono::steady_clock::now() >= node.expires_at) {
+                        if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
                           kv_store.erase(key); // Delete it now (Lazy Expiration)
                           found = false;
                         } else {
