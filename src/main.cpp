@@ -187,43 +187,44 @@ void handle_client(int client_fd) {
             }
 
             else if (command == "LRANGE" && request.elements.size() >= 4) {
-              std::string key = request.elements[1].bulkString;
-              long long start = std::stoll(request.elements[2].bulkString);
-              long long stop = std::stoll(request.elements[3].bulkString);
+    std::string key = request.elements[1].bulkString;
+    long long start = std::stoll(request.elements[2].bulkString);
+    long long stop = std::stoll(request.elements[3].bulkString);
 
-              std::lock_guard<std::mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
 
-              // 1. Check if key exists
-              if (key_value_store.find(key) == key_value_store.end()) {
-                  send(client_fd, "*0\r\n", 4, 0);
-              } else {
-                  auto& list = key_value_store[key];
-                  long long size = static_cast<long long>(list.size());
+    if (key_value_store.find(key) == key_value_store.end()) {
+        send(client_fd, "*0\r\n", 4, 0);
+    } else {
+        auto& list = key_value_store[key];
+        long long size = static_cast<long long>(list.size());
 
-                  // 2. Handle Edge Cases
-                  // User rule: if start < 0, return empty array
-                  if (start < 0 || start >= size || start > stop) {
-                      send(client_fd, "*0\r\n", 4, 0);
-                  } else {
-                      // Treat stop as last element if it exceeds length
-                      if (stop >= size) {
-                          stop = size - 1;
-                      }
+        // 1. Convert negative indices to positive
+        if (start < 0) start = size + start;
+        if (stop < 0) stop = size + stop;
 
-                      // 3. Calculate count and send RESP Array Header
-                      long long count = stop - start + 1;
-                      std::string header = "*" + std::to_string(count) + "\r\n";
-                      send(client_fd, header.c_str(), header.length(), 0);
+        // 2. Clamp boundaries (Redis Behavior)
+        if (start < 0) start = 0;
+        if (stop >= size) stop = size - 1;
 
-                      // 4. Send elements one by one (Memory Efficient)
-                      for (long long i = start; i <= stop; ++i) {
-                          std::string& val = list[i].value;
-                          std::string element_resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                          send(client_fd, element_resp.c_str(), element_resp.length(), 0);
-                      }
-                  }
-              }
-          }
+        // 3. Final sanity check for empty results
+        if (start >= size || start > stop) {
+            send(client_fd, "*0\r\n", 4, 0);
+        } else {
+            // 4. Calculate total count for the RESP Array Header
+            long long count = stop - start + 1;
+            std::string header = "*" + std::to_string(count) + "\r\n";
+            send(client_fd, header.c_str(), header.length(), 0);
+
+            // 5. Stream the elements
+            for (long long i = start; i <= stop; ++i) {
+                std::string& val = list[i].value;
+                std::string element_resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                send(client_fd, element_resp.c_str(), element_resp.length(), 0);
+            }
+        }
+    }
+}
         }
     }
     close(client_fd);
