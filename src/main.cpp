@@ -95,6 +95,9 @@ void handle_client(int client_fd) {
                   long long duration_ms = 0;
                   bool valid_ttl = false;
 
+                  std::cout << "Received SET command with potential TTL. Flag: " << flag << "\n";
+                  
+
                   try {
                     if (flag == "EX") {
                         // Seconds to Milliseconds
@@ -112,7 +115,11 @@ void handle_client(int client_fd) {
                       continue; 
                   }
 
+
+
                   if (valid_ttl) {
+                      std::cout << "Setting TTL for key [" << key << "] to " << duration_ms << " ms\n";
+                      std::cout << "flag: " << flag << "\n";
                       newNode.hasTTL = true;
                       newNode.expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms);
 
