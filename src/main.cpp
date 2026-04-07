@@ -190,7 +190,7 @@ void handle_client(int client_fd) {
                 std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
 
-                cv.notify_all();
+                expiry_cv.notify_all();
             }
 
             else if (command == "LPUSH" && request.elements.size() >= 3) {
@@ -316,9 +316,9 @@ void handle_client(int client_fd) {
             bool data_available = true;
             if (!check_list()) {
                 if (timeout_sec == 0) {
-                    cv.wait(lock, check_list); // Wait forever
+                    expiry_cv.wait(lock, check_list); // Wait forever
                 } else {
-                    data_available = cv.wait_for(lock, std::chrono::seconds(timeout_sec), check_list);
+                    data_available = expiry_cv.wait_for(lock, std::chrono::seconds(timeout_sec), check_list);
                 }
             }
 
