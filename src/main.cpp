@@ -246,19 +246,53 @@ void handle_client(int client_fd) {
           }
 
           else if (command == "LPOP" && request.elements.size() >= 2) {
-              std::string key = request.elements[1].bulkString;
-              std::lock_guard<std::mutex> lock(store_mutex);
-              if (key_value_store.count(key) && !key_value_store[key].empty()) {
-                  std::string val = key_value_store[key][0].value;
-                  key_value_store[key].erase(key_value_store[key].begin());
-                  if (key_value_store[key].empty()) key_value_store.erase(key);
+            std::string key = request.elements[1].bulkString;
+            
+            // Determine if 'count' was provided
+            bool has_count = (request.elements.size() >= 3);
+            int count = 1; 
+            if (has_count) {
+                count = std::stoi(request.elements[2].bulkString);
+            }
 
-                  std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                  send(client_fd, resp.c_str(), resp.length(), 0);
-              } else {
-                  send(client_fd, "$-1\r\n", 5, 0);
-              }
-          }
+            std::lock_guard<std::mutex> lock(store_mutex);
+
+            // 1. Check if key exists
+            if (key_value_store.find(key) == key_value_store.end()) {
+                send(client_fd, "$-1\r\n", 5, 0); // Nil reply
+            } else {
+                auto& list = key_value_store[key];
+
+                // 2. Handle non-positive count (Edge Case)
+                if (has_count && count <= 0) {
+                    send(client_fd, "*0\r\n", 4, 0);
+                } 
+                // 3. Single Pop (Standard LPOP)
+                else if (!has_count) {
+                    std::string val = list[0].value;
+                    list.erase(list.begin());
+                    if (list.empty()) key_value_store.erase(key);
+
+                    std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                    send(client_fd, resp.c_str(), resp.length(), 0);
+                }
+                // 4. Multiple Pop (LPOP key count)
+                else {
+                    int actual_to_pop = std::min((int)list.size(), count);
+                    std::string header = "*" + std::to_string(actual_to_pop) + "\r\n";
+                    send(client_fd, header.c_str(), header.length(), 0);
+
+                    for (int i = 0; i < actual_to_pop; ++i) {
+                        std::string val = list[0].value;
+                        list.erase(list.begin()); // Note: O(N) operation in vector
+                        
+                        std::string element_resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                        send(client_fd, element_resp.c_str(), element_resp.length(), 0);
+                    }
+                    if (list.empty()) key_value_store.erase(key);
+                }
+            }
+        }
       }
     }
     close(client_fd);
