@@ -134,8 +134,8 @@ void handle_client(int client_fd) {
 
                 const char* ok = "+OK\r\n";
                 send(client_fd, ok, strlen(ok), 0);
-                cout << "SET command processed for key: " << key << "\n";
-                cout << "Current store size: " << key_value_store.size() << "\n";
+                std::cout << "SET command processed for key: " << key << "\n";
+                std::cout << "Current store size: " << key_value_store.size() << "\n";
             }
             else if (command.bulkString == "GET" && request.elements.size() > 1) {
                 std::string key = request.elements[1].bulkString;
