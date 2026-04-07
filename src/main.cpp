@@ -186,11 +186,11 @@ void background_cleanup() {
             std::string key_to_expire = expiry_heap.top().key;
             
             // Double check: Did the key get updated with a new TTL since it was added to the heap?
-            if (kv_store.count(key_to_expire) && 
-                kv_store[key_to_expire].has_ttl && 
-                kv_store[key_to_expire].expires_at <= now) {
+            if (key_value_store.count(key_to_expire) && 
+                key_value_store[key_to_expire].hasTTL && 
+                key_value_store[key_to_expire].expires_at <= now) {
                 
-                kv_store.erase(key_to_expire);
+                key_value_store.erase(key_to_expire);
                 std::cout << "Key [" << key_to_expire << "] expired and removed.\n";
             }
             expiry_heap.pop();
