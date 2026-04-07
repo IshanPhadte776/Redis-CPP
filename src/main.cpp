@@ -13,10 +13,39 @@
 //POSIX API for sockets (socket(), bind(), listen(), accept(), close())
 #include <unistd.h>
 
+#include <thread>
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+
+void handle_client(int client_fd) {
+    // 2. Loop to handle multiple commands from THIS specific client
+    //buffer to hold the incoming data from the client, we will read into this buffer and then process the commands. The size of 1024 is arbitrary and can be adjusted based on expected command sizes.
+    char buffer[1024];
+    while (true) {
+      //blocking call that waits for the client to send data, reads the data into the buffer and returns the number of bytes received. If the client disconnects, recv() will return 0 or a negative value, which we can use to break out of the loop and wait for the next client.
+        ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
+        
+        if (bytes_received <= 0) {
+            // Client disconnected or error
+            std::cout << "Client disconnected\n";
+            break; 
+        }
+
+        // 3. Respond to "PING"
+        // Note: Real Redis uses RESP protocol, but for basic testing, 
+        // we check if the input contains "PING"
+        std::string command(buffer, bytes_received);
+        if (command.find("PING") != std::string::npos) {
+            send(client_fd, "+PONG\r\n", 7, 0);
+        }
+    }
+
+    // 4. Clean up this client and wait for the next one
+    close(client_fd);
+}
 
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
@@ -83,32 +112,15 @@ int main(int argc, char **argv) {
         std::cerr << "Accept failed\n";
         continue; // Try again for the next client
     }
+
     std::cout << "Client connected\n";
 
-    // 2. Loop to handle multiple commands from THIS specific client
-    //buffer to hold the incoming data from the client, we will read into this buffer and then process the commands. The size of 1024 is arbitrary and can be adjusted based on expected command sizes.
-    char buffer[1024];
-    while (true) {
-      //blocking call that waits for the client to send data, reads the data into the buffer and returns the number of bytes received. If the client disconnects, recv() will return 0 or a negative value, which we can use to break out of the loop and wait for the next client.
-        ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
-        
-        if (bytes_received <= 0) {
-            // Client disconnected or error
-            std::cout << "Client disconnected\n";
-            break; 
-        }
 
-        // 3. Respond to "PING"
-        // Note: Real Redis uses RESP protocol, but for basic testing, 
-        // we check if the input contains "PING"
-        std::string command(buffer, bytes_received);
-        if (command.find("PING") != std::string::npos) {
-            send(client_fd, "+PONG\r\n", 7, 0);
-        }
-    }
+    std::thread client_thread(handle_client, client_fd);
+    client_thread.detach(); // Detach the thread to allow it to run independently
 
-    // 4. Clean up this client and wait for the next one
-    close(client_fd);
+    
+
   }
   
   close(server_fd);
