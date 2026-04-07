@@ -318,7 +318,8 @@ void handle_client(int client_fd) {
                 if (timeout_sec == 0) {
                     expiry_cv.wait(lock, check_list); // Wait forever
                 } else {
-                    data_available = expiry_cv.wait_for(lock, std::chrono::seconds(timeout_sec), check_list);
+                    auto timeout_duration = std::chrono::duration<double>(timeout_double);
+                    data_available = cv.wait_for(lock, timeout_duration, check_list);
                 }
             }
 
