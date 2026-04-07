@@ -30,7 +30,7 @@ struct Node {
     std::string value;
     std::chrono::steady_clock::time_point expires_at; // Time point when the key expires
     bool hasTTL = false;
-}
+};
 
 struct ExpiryEntry {
     std::string key;
