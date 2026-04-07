@@ -96,7 +96,7 @@ void handle_client(int client_fd) {
                   bool valid_ttl = false;
 
                   std::cout << "Received SET command with potential TTL. Flag: " << flag << "\n";
-                  
+
 
                   try {
                     if (flag == "EX") {
@@ -119,7 +119,6 @@ void handle_client(int client_fd) {
 
                   if (valid_ttl) {
                       std::cout << "Setting TTL for key [" << key << "] to " << duration_ms << " ms\n";
-                      std::cout << "flag: " << flag << "\n";
                       newNode.hasTTL = true;
                       newNode.expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms);
 
@@ -127,6 +126,7 @@ void handle_client(int client_fd) {
                       ExpiryEntry entry{key, newNode.expires_at};
                       {
                           std::lock_guard<std::mutex> lock(store_mutex);
+                          key_value_store[key] = newNode; // Store the key-value pair before adding to the heap to ensure consistency
                           expiry_heap.push(entry);
                       }
                   }
