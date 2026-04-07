@@ -236,6 +236,14 @@ void handle_client(int client_fd) {
                   }
               }
           }
+
+          else if (command == "LLEN" && request.elements.size() >= 2) {
+              std::string key = request.elements[1].bulkString;
+              std::lock_guard<std::mutex> lock(store_mutex);
+              long long len = key_value_store.count(key) ? key_value_store[key].size() : 0;
+              std::string resp = ":" + std::to_string(len) + "\r\n";
+              send(client_fd, resp.c_str(), resp.length(), 0);
+          }
         }
     }
     close(client_fd);
