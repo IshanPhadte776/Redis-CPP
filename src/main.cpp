@@ -185,6 +185,45 @@ void handle_client(int client_fd) {
                 std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
             }
+
+            else if (command == "LRANGE" && request.elements.size() >= 4) {
+              std::string key = request.elements[1].bulkString;
+              long long start = std::stoll(request.elements[2].bulkString);
+              long long stop = std::stoll(request.elements[3].bulkString);
+
+              std::lock_guard<std::mutex> lock(store_mutex);
+
+              // 1. Check if key exists
+              if (key_value_store.find(key) == key_value_store.end()) {
+                  send(client_fd, "*0\r\n", 4, 0);
+              } else {
+                  auto& list = key_value_store[key];
+                  long long size = static_cast<long long>(list.size());
+
+                  // 2. Handle Edge Cases
+                  // User rule: if start < 0, return empty array
+                  if (start < 0 || start >= size || start > stop) {
+                      send(client_fd, "*0\r\n", 4, 0);
+                  } else {
+                      // Treat stop as last element if it exceeds length
+                      if (stop >= size) {
+                          stop = size - 1;
+                      }
+
+                      // 3. Calculate count and send RESP Array Header
+                      long long count = stop - start + 1;
+                      std::string header = "*" + std::to_string(count) + "\r\n";
+                      send(client_fd, header.c_str(), header.length(), 0);
+
+                      // 4. Send elements one by one (Memory Efficient)
+                      for (long long i = start; i <= stop; ++i) {
+                          std::string& val = list[i].value;
+                          std::string element_resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                          send(client_fd, element_resp.c_str(), element_resp.length(), 0);
+                      }
+                  }
+              }
+          }
         }
     }
     close(client_fd);
