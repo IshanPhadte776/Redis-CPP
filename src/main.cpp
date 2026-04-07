@@ -14,6 +14,8 @@
 #include <unistd.h>
 
 #include <thread>
+#include <mutex>
+#include <unordered_map>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -21,6 +23,10 @@
 #include <netdb.h>
 
 #include "respparser.h"
+
+
+std::unordered_map<std::string, std::string> key_value_store; // In-memory key-value store
+std::mutex store_mutex;
 
 void handle_client(int client_fd) {
     // 2. Loop to handle multiple commands from THIS specific client
@@ -57,6 +63,40 @@ void handle_client(int client_fd) {
                 std::string response = "$" + std::to_string(message.length()) + "\r\n" + message + "\r\n";
                 send(client_fd, response.c_str(), response.length(), 0);
             }
+
+            else if (command.bulkString == "SET" && request.elements.size() > 2) {
+                std::string key = request.elements[1].bulkString;
+                std::string value = request.elements[2].bulkString;
+
+                {
+                    std::lock_guard<std::mutex> lock(store_mutex);
+                    key_value_store[key] = value;
+                }
+
+                const char* ok = "+OK\r\n";
+                send(client_fd, ok, strlen(ok), 0);
+            }
+            else if (command.bulkString == "GET" && request.elements.size() > 1) {
+                std::string key = request.elements[1].bulkString;
+                std::string value;
+
+                {
+                    std::lock_guard<std::mutex> lock(store_mutex);
+                    auto it = key_value_store.find(key);
+                    if (it != key_value_store.end()) {
+                        value = it->second;
+                    }
+                }
+
+                if (!value.empty()) {
+                    std::string response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+                    send(client_fd, response.c_str(), response.length(), 0);
+                } else {
+                    const char* nil = "$-1\r\n";
+                    send(client_fd, nil, strlen(nil), 0);
+                }
+            }
+
             else {
                 // Optional: Handle unknown commands
                 const char* err = "-ERR unknown command\r\n";
