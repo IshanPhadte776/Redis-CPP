@@ -138,18 +138,24 @@ void handle_client(int client_fd) {
             }
             else if (command.bulkString == "GET" && request.elements.size() > 1) {
                 std::string key = request.elements[1].bulkString;
-                std::string value;
+                std::string result;
 
                 {
                     std::lock_guard<std::mutex> lock(store_mutex);
-                    auto it = key_value_store.find(key);
-                    if (it != key_value_store.end()) {
-                        value = it->second;
+                    if (key_value_store.count(key)) {
+                        Node& node = key_value_store[key];
+                        if (node.has_ttl && std::chrono::steady_clock::now() >= node.expires_at) {
+                          kv_store.erase(key); // Delete it now (Lazy Expiration)
+                          found = false;
+                        } else {
+                          result = node.value;
+                          found = true;
+                        } 
                     }
                 }
 
                 if (!value.empty()) {
-                    std::string response = "$" + std::to_string(value.length()) + "\r\n" + value + "\r\n";
+                    std::string response = "$" + std::to_string(result.length()) + "\r\n" + result + "\r\n";
                     send(client_fd, response.c_str(), response.length(), 0);
                 } else {
                     const char* nil = "$-1\r\n";
