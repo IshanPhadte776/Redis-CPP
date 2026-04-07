@@ -47,11 +47,11 @@ void handle_client(int client_fd) {
             for (auto &c : command) c = toupper(c);
 
                 // 5. Handle the specific commands
-            if (command == "PING") {
+            if (command.bulkString == "PING") {
                 const char* pong = "+PONG\r\n";
                 send(client_fd, pong, strlen(pong), 0);
             } 
-            else if (command == "ECHO" && request.elements.size() > 1) {
+            else if (command.bulkString == "ECHO" && request.elements.size() > 1) {
                 // Echo back the second element in the array
                 std::string message = request.elements[1].bulkString;
                 std::string response = "$" + std::to_string(message.length()) + "\r\n" + message + "\r\n";
@@ -65,14 +65,7 @@ void handle_client(int client_fd) {
         }
 
 
-        }
-
-
-        // std::string command(buffer, bytes_received);
-        // if (command.find("PING") != std::string::npos) {
-        //     send(client_fd, "+PONG\r\n", 7, 0);
-        // }
-    }
+      }
 
     // 4. Clean up this client and wait for the next one
     close(client_fd);
