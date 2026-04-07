@@ -1,8 +1,15 @@
+//This is code for a TCP Server that listens on port 6397 (Redis port) for incoming client connections
+//For cin and cout
 #include <iostream>
+//general purpose functions like exit() 
 #include <cstdlib>
+//C++ String
 #include <string>
+//C String functions like memset()
 #include <cstring>
+//POSIX API for sockets (socket(), bind(), listen(), accept(), close())
 #include <unistd.h>
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -10,6 +17,7 @@
 
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
+  // This is to ensure tht even if the server crashs, the buffer is flushed out and we can see the logs in the tester output
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
   
@@ -52,10 +60,14 @@ int main(int argc, char **argv) {
 
   // Uncomment the code below to pass the first stage
   
-  accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+  int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, (socklen_t*)&client_addr_len);
   std::cout << "Client connected\n";
+
+  const char *response = "+PONG\r\n";
+  send(client_fd, response, strlen(response), 0);
   
   close(server_fd);
+  close(client_fd);
 
   return 0;
 }
