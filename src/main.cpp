@@ -107,16 +107,9 @@ int main(int argc, char **argv) {
 
     // 4. Clean up this client and wait for the next one
     close(client_fd);
-}
-
-
   }
-
-  const char *response = "+PONG\r\n";
-  send(client_fd, response, strlen(response), 0);
   
   close(server_fd);
-  close(client_fd);
 
   return 0;
 }
