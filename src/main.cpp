@@ -304,7 +304,7 @@ void handle_client(int client_fd) {
         else if (command == "BLPOP" && request.elements.size() >= 3) {
             std::string key = request.elements[1].bulkString;
 
-            double timeout_sec = std::stoi(request.elements.back().bulkString);
+            double timeout_sec = std::stod(request.elements.back().bulkString);
 
             std::unique_lock<std::mutex> lock(store_mutex);
             // 1. Check if the list already has items
