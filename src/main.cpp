@@ -44,7 +44,7 @@ void handle_client(int client_fd) {
         //check for a valid Redis Array
         if (request.type == RespType::Array && !request.elements.empty()) {
             RespValue command = request.elements[0]; // Assuming the first element is the command
-            for (auto &c : command) c = toupper(c);
+            for (auto &c : command.bulkString) c = toupper(c);
 
                 // 5. Handle the specific commands
             if (command.bulkString == "PING") {
