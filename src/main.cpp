@@ -13,6 +13,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
+
+#include <condition_variable>
+
 // ==========================================
 // 1. RESP Protocol Parser
 // ==========================================
@@ -68,6 +71,8 @@ struct Node {
 // Map: Key Name -> Vector of Nodes
 std::unordered_map<std::string, std::vector<Node>> key_value_store;
 std::mutex store_mutex;
+
+std::condition_variable expiry_cv;
 
 struct ExpiryEntry {
     std::string key;
@@ -184,6 +189,8 @@ void handle_client(int client_fd) {
                 }
                 std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
+
+                cv.notify_all();
             }
 
             else if (command == "LPUSH" && request.elements.size() >= 3) {
@@ -293,6 +300,42 @@ void handle_client(int client_fd) {
                 }
             }
         }
+
+        else if (command == "BLPOP" && request.elements.size() >= 3) {
+            std::string key = request.elements[1].bulkString;
+
+            int timeout = std::stoi(request.elements.back().bulkString);
+
+            std::unique_lock<std::mutex> lock(store_mutex);
+            // 1. Check if the list already has items
+            auto check_list = [&]() {
+                return key_value_store.count(key) && !key_value_store[key].empty();
+            };
+
+            // 2. If empty, wait for notification or timeout
+            bool data_available = true;
+            if (!check_list()) {
+                if (timeout_sec == 0) {
+                    cv.wait(lock, check_list); // Wait forever
+                } else {
+                    data_available = cv.wait_for(lock, std::chrono::seconds(timeout_sec), check_list);
+                }
+            }
+
+            if (data_available && check_list()) {
+                auto& list = key_value_store[key];
+                std::string val = list.front().value;
+                list.erase(list.begin()); // Pop the left-most element
+
+                // BLPOP returns an array: [key, value]
+                std::string resp = "*2\r\n";
+                resp += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
+                resp += "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                send(client_fd, resp.c_str(), resp.length(), 0);
+            } else {
+                // Timeout reached - return Null Array
+                send(client_fd, "*-1\r\n", 5, 0);
+            }
       }
     }
     close(client_fd);
