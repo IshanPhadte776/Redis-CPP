@@ -92,7 +92,7 @@ void handle_client(int client_fd) {
                 newNode.hasTTL = false; // By default, no TTL
 
                 if (request.elements.size() >= 5){
-                  std:string flag = request.elements[3].bulkString;
+                  std::string flag = request.elements[3].bulkString;
                   long long duration_ms = 0;
                   bool valid_ttl = false;
 
