@@ -146,15 +146,13 @@ void handle_client(int client_fd) {
                         Node& node = key_value_store[key];
                         if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
                           key_value_store.erase(key); // Delete it now (Lazy Expiration)
-                          found = false;
                         } else {
                           result = node.value;
-                          found = true;
                         } 
                     }
                 }
 
-                if (!value.empty()) {
+                if (!result.empty()) {
                     std::string response = "$" + std::to_string(result.length()) + "\r\n" + result + "\r\n";
                     send(client_fd, response.c_str(), response.length(), 0);
                 } else {
