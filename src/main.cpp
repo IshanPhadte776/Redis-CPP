@@ -180,7 +180,7 @@ void background_cleanup() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Check 10 times a second
 
         auto now = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> lock(kv_mutex);
+        std::lock_guard<std::mutex> lock(store_mutex);
 
         while (!expiry_heap.empty() && expiry_heap.top().time <= now) {
             std::string key_to_expire = expiry_heap.top().key;
