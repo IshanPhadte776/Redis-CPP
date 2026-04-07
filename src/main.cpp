@@ -182,7 +182,7 @@ void background_cleanup() {
         auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(store_mutex);
 
-        while (!expiry_heap.empty() && expiry_heap.top().time <= now) {
+        while (!expiry_heap.empty() && expiry_heap.top().expires_at <= now) {
             std::string key_to_expire = expiry_heap.top().key;
             
             // Double check: Did the key get updated with a new TTL since it was added to the heap?
