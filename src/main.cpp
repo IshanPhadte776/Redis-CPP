@@ -36,10 +36,9 @@ struct ExpiryEntry {
     std::string key;
     std::chrono::steady_clock::time_point expires_at;
 
-  bool operator<(const ExpiryEntry& other) const {
-        // We want the earliest expiry time to have the highest priority (i.e., be at the top of the priority queue)
-        return expires_at > other.expires_at; // Reverse order for min-heap behavior
-    }
+  friend bool operator>(const ExpiryEntry& a, const ExpiryEntry& b) {
+        return a.expires_at > b.expires_at;
+  }
 
 };
 
