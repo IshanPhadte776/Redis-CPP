@@ -186,45 +186,56 @@ void handle_client(int client_fd) {
                 send(client_fd, resp.c_str(), resp.length(), 0);
             }
 
-            else if (command == "LRANGE" && request.elements.size() >= 4) {
-    std::string key = request.elements[1].bulkString;
-    long long start = std::stoll(request.elements[2].bulkString);
-    long long stop = std::stoll(request.elements[3].bulkString);
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-
-    if (key_value_store.find(key) == key_value_store.end()) {
-        send(client_fd, "*0\r\n", 4, 0);
-    } else {
-        auto& list = key_value_store[key];
-        long long size = static_cast<long long>(list.size());
-
-        // 1. Convert negative indices to positive
-        if (start < 0) start = size + start;
-        if (stop < 0) stop = size + stop;
-
-        // 2. Clamp boundaries (Redis Behavior)
-        if (start < 0) start = 0;
-        if (stop >= size) stop = size - 1;
-
-        // 3. Final sanity check for empty results
-        if (start >= size || start > stop) {
-            send(client_fd, "*0\r\n", 4, 0);
-        } else {
-            // 4. Calculate total count for the RESP Array Header
-            long long count = stop - start + 1;
-            std::string header = "*" + std::to_string(count) + "\r\n";
-            send(client_fd, header.c_str(), header.length(), 0);
-
-            // 5. Stream the elements
-            for (long long i = start; i <= stop; ++i) {
-                std::string& val = list[i].value;
-                std::string element_resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                send(client_fd, element_resp.c_str(), element_resp.length(), 0);
+            else if (command == "LPUSH" && request.elements.size() >= 3) {
+                std::string key = request.elements[1].bulkString;
+                std::lock_guard<std::mutex> lock(store_mutex);
+                auto &vec = key_value_store[key];
+                for (size_t i = 2; i < request.elements.size(); ++i) {
+                    vec.insert(vec.begin(), {request.elements[i].bulkString, {}, false});
+                }
+                std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
+                send(client_fd, resp.c_str(), resp.length(), 0);
             }
-        }
-    }
-}
+
+            else if (command == "LRANGE" && request.elements.size() >= 4) {
+              std::string key = request.elements[1].bulkString;
+              long long start = std::stoll(request.elements[2].bulkString);
+              long long stop = std::stoll(request.elements[3].bulkString);
+
+              std::lock_guard<std::mutex> lock(store_mutex);
+
+              if (key_value_store.find(key) == key_value_store.end()) {
+                  send(client_fd, "*0\r\n", 4, 0);
+              } else {
+                  auto& list = key_value_store[key];
+                  long long size = static_cast<long long>(list.size());
+
+                  // 1. Convert negative indices to positive
+                  if (start < 0) start = size + start;
+                  if (stop < 0) stop = size + stop;
+
+                  // 2. Clamp boundaries (Redis Behavior)
+                  if (start < 0) start = 0;
+                  if (stop >= size) stop = size - 1;
+
+                  // 3. Final sanity check for empty results
+                  if (start >= size || start > stop) {
+                      send(client_fd, "*0\r\n", 4, 0);
+                  } else {
+                      // 4. Calculate total count for the RESP Array Header
+                      long long count = stop - start + 1;
+                      std::string header = "*" + std::to_string(count) + "\r\n";
+                      send(client_fd, header.c_str(), header.length(), 0);
+
+                      // 5. Stream the elements
+                      for (long long i = start; i <= stop; ++i) {
+                          std::string& val = list[i].value;
+                          std::string element_resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                          send(client_fd, element_resp.c_str(), element_resp.length(), 0);
+                      }
+                  }
+              }
+          }
         }
     }
     close(client_fd);
