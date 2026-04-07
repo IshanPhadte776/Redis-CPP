@@ -145,7 +145,7 @@ void handle_client(int client_fd) {
                     if (key_value_store.count(key)) {
                         Node& node = key_value_store[key];
                         if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
-                          kv_store.erase(key); // Delete it now (Lazy Expiration)
+                          key_value_store.erase(key); // Delete it now (Lazy Expiration)
                           found = false;
                         } else {
                           result = node.value;
