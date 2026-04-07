@@ -258,7 +258,8 @@ void handle_client(int client_fd) {
               } else {
                   send(client_fd, "$-1\r\n", 5, 0);
               }
-        }
+          }
+      }
     }
     close(client_fd);
 }
