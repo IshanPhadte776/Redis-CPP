@@ -20,6 +20,8 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
+#include "respparser.h"
+
 void handle_client(int client_fd) {
     // 2. Loop to handle multiple commands from THIS specific client
     //buffer to hold the incoming data from the client, we will read into this buffer and then process the commands. The size of 1024 is arbitrary and can be adjusted based on expected command sizes.
@@ -35,12 +37,41 @@ void handle_client(int client_fd) {
         }
 
         // 3. Respond to "PING"
-        // Note: Real Redis uses RESP protocol, but for basic testing, 
-        // we check if the input contains "PING"
-        std::string command(buffer, bytes_received);
-        if (command.find("PING") != std::string::npos) {
-            send(client_fd, "+PONG\r\n", 7, 0);
+        
+        std::string raw_data(buffer, bytes_received);
+        RespValue request = RespParser::parse(raw_data);
+
+        //check for a valid Redis Array
+        if (request.type == RespType::Array && !request.elements.empty()) {
+            RespValue command = request.elements[0]; // Assuming the first element is the command
+            for (auto &c : command) c = toupper(c);
+
+                // 5. Handle the specific commands
+            if (command == "PING") {
+                const char* pong = "+PONG\r\n";
+                send(client_fd, pong, strlen(pong), 0);
+            } 
+            else if (command == "ECHO" && request.elements.size() > 1) {
+                // Echo back the second element in the array
+                std::string message = request.elements[1].bulkString;
+                std::string response = "$" + std::to_string(message.length()) + "\r\n" + message + "\r\n";
+                send(client_fd, response.c_str(), response.length(), 0);
+            }
+            else {
+                // Optional: Handle unknown commands
+                const char* err = "-ERR unknown command\r\n";
+                send(client_fd, err, strlen(err), 0);
+            }
         }
+
+
+        }
+
+
+        // std::string command(buffer, bytes_received);
+        // if (command.find("PING") != std::string::npos) {
+        //     send(client_fd, "+PONG\r\n", 7, 0);
+        // }
     }
 
     // 4. Clean up this client and wait for the next one
