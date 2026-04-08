@@ -261,49 +261,67 @@ void handle_client(int client_fd) {
             else if (command == "RPUSH" && request.elements.size() >= 3) {
                 std::string key = request.elements[1].bulkString;
                 std::lock_guard<std::mutex> lock(store_mutex);
-                auto &vec = key_value_store[key];
+                Node &node = key_value_store[key];
 
                 if (!vec.empty() && vec[0].type != KeyType::List) {
                   send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
                   return;
                 }
 
-                if (vec.type == KeyType::None) {
-                    vec.type = KeyType::List;
-                    vec.value = std::vector<std::string>{};
+                // 1. Initialize if new key
+                if (node.type == KeyType::None) {
+                    node.type = KeyType::List;
+                    node.value = std::vector<std::string>{};
                 }
 
-                if (std::holds_alternative<std::vector<std::string>>(vec.value)) {
-                    auto& list = std::get<std::vector<std::string>>(vec.value);
-                    for (size_t i = 2; i < request.elements.size(); ++i) {
-                        list.push_back(request.elements[i].bulkString);
-                    }
-                }
-                std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
-                send(client_fd, resp.c_str(), resp.length(), 0);
-
-                expiry_cv.notify_all();
-            }
-
-            else if (command == "LPUSH" && request.elements.size() >= 3) {
-                std::string key = request.elements[1].bulkString;
-                std::lock_guard<std::mutex> lock(store_mutex);
-                auto &vec = key_value_store[key];
-
-                if (!vec.empty() && vec[0].type != KeyType::List) {
+                // 2. Type Check
+                if (node.type != KeyType::List) {
                     send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
                     return;
                 }
 
+                // 3. Extract the vector from the variant and push
+                auto& list = std::get<std::vector<std::string>>(node.value);
                 for (size_t i = 2; i < request.elements.size(); ++i) {
-                    Node n;
-                    n.value = request.elements[i].bulkString;
-                    n.type = KeyType::List; // Mark as list
-                    vec.insert(vec.begin(), n);
+                    list.push_back(request.elements[i].bulkString);
                 }
-                std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
+
+                // 4. Return size
+                std::string resp = ":" + std::to_string(list.size()) + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
+
+                // 5. Signal blocked BLPOP threads
+                expiry_cv.notify_all();
             }
+
+            else if (command == "LPUSH" && request.elements.size() >= 3) {
+              std::string key = request.elements[1].bulkString;
+              std::lock_guard<std::mutex> lock(store_mutex);
+              
+              Node &node = key_value_store[key];
+
+              if (node.type == KeyType::None) {
+                  node.type = KeyType::List;
+                  node.value = std::vector<std::string>{};
+              }
+
+              if (node.type != KeyType::List) {
+                  send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
+                  return;
+              }
+
+              auto& list = std::get<std::vector<std::string>>(node.value);
+              for (size_t i = 2; i < request.elements.size(); ++i) {
+                  // Standard Redis LPUSH behavior: 
+                  // LPUSH key a b c -> List becomes [c, b, a]
+                  list.insert(list.begin(), request.elements[i].bulkString);
+              }
+
+              std::string resp = ":" + std::to_string(list.size()) + "\r\n";
+              send(client_fd, resp.c_str(), resp.length(), 0);
+
+              expiry_cv.notify_all();
+          }
 
             else if (command == "LRANGE" && request.elements.size() >= 4) {
               std::string key = request.elements[1].bulkString;
