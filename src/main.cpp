@@ -544,7 +544,8 @@ void handle_client(int client_fd) {
                 return;
             }
             if (!stream.empty() && !(final_id > last_id)) {
-                send(client_fd, "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n", 82, 0);
+                const std::string err_msg = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                send(client_fd, err_msg.c_str(), err_msg.length(), 0);
                 return;
             }
         }
