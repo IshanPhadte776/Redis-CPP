@@ -553,7 +553,7 @@ void handle_client(int client_fd) {
                     std::cout << "[DEBUG] Error: ID is 0-0" << std::endl;
                     std::string err = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
                     send(client_fd, err.c_str(), err.length(), 0);
-                    break;
+                    continue;
                 }
                 
                 // PAY ATTENTION HERE: This is where 0-3 vs 1-2 should fail
@@ -561,7 +561,7 @@ void handle_client(int client_fd) {
                     std::cout << "[DEBUG] Error: ID not monotonic. final_id <= last_id" << std::endl;
                     std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
                     send(client_fd, err.c_str(), err.length(), 0);
-                    break;
+                    continue;
                 }
             }
         } catch (const std::exception& e) {
