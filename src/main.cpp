@@ -87,6 +87,18 @@ struct StreamID {
         } catch (...) { return {0, 0}; }
     }
 
+    static StreamID parseRange(const std::string& s, bool is_start) {
+        if (s == "-") return {0, 0};
+        if (s == "+") return {LLONG_MAX, LLONG_MAX};
+
+        size_t dash = s.find('-');
+        if (dash == std::string::npos) {
+            // No sequence provided
+            return {std::stoll(s), is_start ? 0 : LLONG_MAX};
+        }
+        return {std::stoll(s.substr(0, dash)), std::stoll(s.substr(dash + 1))};
+    }
+
     std::string toString() const {
         return std::to_string(ms) + "-" + std::to_string(seq);
     }
@@ -95,6 +107,16 @@ struct StreamID {
     bool operator>(const StreamID& other) const {
         if (ms != other.ms) return ms > other.ms;
         return seq > other.seq;
+    }
+
+    // Comparison for binary search
+    bool operator<(const StreamID& other) const {
+        if (ms != other.ms) return ms < other.ms;
+        return seq < other.seq;
+    }
+    bool operator<=(const StreamID& other) const {
+        if (ms != other.ms) return ms < other.ms;
+        return seq <= other.seq;
     }
 };
 
@@ -584,6 +606,57 @@ void handle_client(int client_fd) {
         
         expiry_cv.notify_all();
     }
+
+    else if (command == "XRANGE" && request.elements.size() >= 4) {
+    std::string key = request.elements[1].bulkString;
+    StreamID start_id = StreamID::parseRange(request.elements[2].bulkString, true);
+    StreamID end_id = StreamID::parseRange(request.elements[3].bulkString, false);
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+    
+    auto it = key_value_store.find(key);
+    if (it == key_value_store.end() || it->second.type != KeyType::Stream) {
+        send(client_fd, "*0\r\n", 4, 0);
+    } else {
+        auto& stream = std::get<std::vector<StreamEntry>>(it->second.value);
+
+        // 1. Binary Search for the start iterator (First element >= start_id)
+        auto start_it = std::lower_bound(stream.begin(), stream.end(), start_id, 
+            [](const StreamEntry& e, const StreamID& id) { return e.id < id; });
+
+        // 2. Binary Search for the end iterator (First element > end_id)
+        auto end_it = std::upper_bound(stream.begin(), stream.end(), end_id, 
+            [](const StreamID& id, const StreamEntry& e) { return id < e.id; });
+
+        // 3. Calculate count and send RESP Array Header
+        long long count = std::distance(start_it, end_it);
+        if (count < 0) count = 0;
+        
+        std::string header = "*" + std::to_string(count) + "\r\n";
+        send(client_fd, header.c_str(), header.length(), 0);
+
+        // 4. Loop through the range
+        for (auto entry_it = start_it; entry_it != end_it; ++entry_it) {
+            const auto& entry = *entry_it;
+            
+            // Each entry is an array: [ID, [field1, value1, field2, value2...]]
+            std::string entry_resp = "*2\r\n";
+            
+            // Send ID
+            std::string id_str = entry.id.toString();
+            entry_resp += "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+            
+            // Send Fields Array
+            entry_resp += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
+            for (const auto& pair : entry.fields) {
+                entry_resp += "$" + std::to_string(pair.first.length()) + "\r\n" + pair.first + "\r\n";
+                entry_resp += "$" + std::to_string(pair.second.length()) + "\r\n" + pair.second + "\r\n";
+            }
+            
+            send(client_fd, entry_resp.c_str(), entry_resp.length(), 0);
+        }
+    }
+}
 
       }
     }
