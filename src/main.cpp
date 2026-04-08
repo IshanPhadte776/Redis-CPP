@@ -498,81 +498,83 @@ void handle_client(int client_fd) {
       }
 
       else if (command == "XADD" && request.elements.size() >= 3) {
-    std::string key = request.elements[1].bulkString;
-    std::string id_req = request.elements[2].bulkString;
+        std::string key = request.elements[1].bulkString;
+        std::string id_req = request.elements[2].bulkString;
 
-    std::lock_guard<std::mutex> lock(store_mutex);
-    Node &node = key_value_store[key];
+        std::lock_guard<std::mutex> lock(store_mutex);
+        Node &node = key_value_store[key];
 
-    // 1. Initialize or Type Check
-    if (node.type == KeyType::None) {
-        node.type = KeyType::Stream;
-        node.value = std::vector<StreamEntry>{};
-    } else if (node.type != KeyType::Stream) {
-        std::string err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
-        send(client_fd, err.c_str(), err.length(), 0);
-        return;
-    }
+        // 1. Type Initialization / Check
+        if (node.type == KeyType::None) {
+            node.type = KeyType::Stream;
+            node.value = std::vector<StreamEntry>{};
+        } else if (node.type != KeyType::Stream) {
+            std::string err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+            send(client_fd, err.c_str(), err.length(), 0);
+            return;
+        }
 
-    auto& stream = std::get<std::vector<StreamEntry>>(node.value);
-    StreamID last_id = stream.empty() ? StreamID{0, 0} : stream.back().id;
-    StreamID final_id;
+        auto& stream = std::get<std::vector<StreamEntry>>(node.value);
+        StreamID last_id = stream.empty() ? StreamID{0, 0} : stream.back().id;
+        StreamID final_id;
 
-    // 2. Handle ID Generation Scenarios
-    if (id_req == "*") {
-        // Full Auto: Current time
-        long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        final_id.ms = std::max(now_ms, last_id.ms);
-        final_id.seq = (final_id.ms == last_id.ms) ? last_id.seq + 1 : 0;
-        if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
-    } 
-    else if (id_req.find("-*") != std::string::npos) {
-        // Partial Auto: user-ms-*
+        // 2. ID Logic (The "Bulletproof" Parser)
         try {
-            long long req_ms = std::stoll(id_req.substr(0, id_req.find("-*")));
-            if (req_ms < last_id.ms) {
-                std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-                send(client_fd, err.c_str(), err.length(), 0);
-                return;
+            if (id_req == "*") {
+                long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                final_id.ms = std::max(now_ms, last_id.ms);
+                final_id.seq = (final_id.ms == last_id.ms) ? last_id.seq + 1 : 0;
+                if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
+            } 
+            else if (id_req.find("-*") != std::string::npos) {
+                long long req_ms = std::stoll(id_req.substr(0, id_req.find("-*")));
+                if (req_ms < last_id.ms) {
+                    std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                    send(client_fd, err.c_str(), err.length(), 0);
+                    return;
+                }
+                final_id.ms = req_ms;
+                final_id.seq = (req_ms == last_id.ms) ? last_id.seq + 1 : 0;
+                if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
+            } 
+            else {
+                final_id = StreamID::parse(id_req);
+                // Validation 1: Must be > 0-0
+                if (final_id.ms == 0 && final_id.seq == 0) {
+                    std::string err = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+                    send(client_fd, err.c_str(), err.length(), 0);
+                    return;
+                }
+                // Validation 2: Monotonicity (The 0-3 vs 1-2 test)
+                if (!stream.empty() && !(final_id > last_id)) {
+                    std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                    send(client_fd, err.c_str(), err.length(), 0);
+                    return;
+                }
             }
-            final_id.ms = req_ms;
-            final_id.seq = (req_ms == last_id.ms) ? last_id.seq + 1 : 0;
-            if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
         } catch (...) {
-            send(client_fd, "-ERR Invalid ID format\r\n", 24, 0); return;
-        }
-    } 
-    else {
-        // Explicit ID: ms-seq
-        final_id = StreamID::parse(id_req);
-        if (final_id.ms == 0 && final_id.seq == 0) {
-            std::string err = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+            // If stoll fails or anything weird happens, tell the client!
+            std::string err = "-ERR Invalid stream ID format\r\n";
             send(client_fd, err.c_str(), err.length(), 0);
             return;
         }
-        if (!stream.empty() && !(final_id > last_id)) {
-            std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-            send(client_fd, err.c_str(), err.length(), 0);
-            return;
+
+        // 3. Store the Entry
+        StreamEntry entry;
+        entry.id = final_id;
+        for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
+            entry.fields.push_back({request.elements[i].bulkString, request.elements[i+1].bulkString});
         }
-    }
+        stream.push_back(entry);
 
-    // 3. Store Entry
-    StreamEntry entry;
-    entry.id = final_id;
-    for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
-        entry.fields[request.elements[i].bulkString] = request.elements[i+1].bulkString;
+        // 4. Final Response
+        std::string id_str = final_id.toString();
+        std::string resp = "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+        send(client_fd, resp.c_str(), resp.length(), 0);
+        
+        expiry_cv.notify_all();
     }
-    stream.push_back(entry);
-
-    // 4. Respond with the final ID
-    std::string id_str = final_id.toString();
-    std::string resp = "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
-    send(client_fd, resp.c_str(), resp.length(), 0);
-    
-    expiry_cv.notify_all();
-}
 
       }
     }
