@@ -62,17 +62,29 @@ public:
 // ==========================================
 // 2. Data Structures & Global Store
 // ==========================================
+
+enum class KeyType {
+  None, // Default for non-existent keys
+  String, //Created via SET
+  List,  // Created via RPUSH/LPUSH
+  Set, // Created via SADD
+  ZSet, // Created via ZADD
+  Hash, // Created via HSET
+  Stream, // Created via XADD
+  VectorSet, // Created via VADD (Hypothetical Command for Vector Similarity Search)
+}
+
+
+
+
+
 struct Node {
-    std::string value;
+    std::string value;    // We definitely still need this for the actual values!
+    KeyType type = KeyType::None;
     std::chrono::steady_clock::time_point expires_at;
     bool hasTTL = false;
 };
 
-// Map: Key Name -> Vector of Nodes
-std::unordered_map<std::string, std::vector<Node>> key_value_store;
-std::mutex store_mutex;
-
-std::condition_variable expiry_cv;
 
 struct ExpiryEntry {
     std::string key;
@@ -83,7 +95,30 @@ struct ExpiryEntry {
     }
 };
 
+// Map: Key Name -> Vector of Nodes
+std::unordered_map<std::string, std::vector<Node>> key_value_store;
+std::mutex store_mutex;
+
+std::condition_variable expiry_cv;
+
+
 std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEntry>> expiry_heap;
+
+
+// Map the enum to the string response required by Redis
+std::string typeToString(KeyType t) {
+    switch (t) {
+        case KeyType::String:    return "string";
+        case KeyType::List:      return "list";
+        case KeyType::Set:       return "set";
+        case KeyType::ZSet:      return "zset";
+        case KeyType::Hash:      return "hash";
+        case KeyType::Stream:    return "stream";
+        case KeyType::VectorSet: return "vectorset";
+        default:                 return "none";
+    }
+}
+
 
 // ==========================================
 // 3. Background Cleanup (Active Expiry)
@@ -138,7 +173,7 @@ void handle_client(int client_fd) {
             else if (command == "SET" && request.elements.size() >= 3) {
                 std::string key = request.elements[1].bulkString;
                 std::string val = request.elements[2].bulkString;
-                Node n; n.value = val; n.hasTTL = false;
+                Node n; n.value = val; n.hasTTL = false; n.type = KeyType::String;
 
                 if (request.elements.size() >= 5) {
                     std::string flag = request.elements[3].bulkString;
@@ -154,6 +189,8 @@ void handle_client(int client_fd) {
                     key_value_store[key] = { n }; // SET overwrites key with 1-node vector
                 } else {
                     std::lock_guard<std::mutex> lock(store_mutex);
+                    vc.elements = { n }; // n is your Node
+
                     key_value_store[key] = { n };
                 }
                 send(client_fd, "+OK\r\n", 5, 0);
@@ -184,8 +221,17 @@ void handle_client(int client_fd) {
                 std::string key = request.elements[1].bulkString;
                 std::lock_guard<std::mutex> lock(store_mutex);
                 auto &vec = key_value_store[key];
+
+                if (!vec.empty() && vec[0].type != KeyType::List) {
+                  send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
+                  return;
+                }
+
                 for (size_t i = 2; i < request.elements.size(); ++i) {
-                    vec.push_back({request.elements[i].bulkString, {}, false});
+                    Node n;
+                    n.data = request.elements[i].bulkString;
+                    n.type = KeyType::List; // Mark as list
+                    vec.push_back(n);
                 }
                 std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
@@ -338,6 +384,35 @@ void handle_client(int client_fd) {
                 send(client_fd, "*-1\r\n", 5, 0);
             }
         }
+
+        else if (command == "TYPE" && request.elements.size() >= 2) {
+          std::string key = request.elements[1].bulkString;
+          std::string result = "none";
+
+          std::lock_guard<std::mutex> lock(store_mutex);
+          if (key_value_store.count(key)) {
+              auto& vec = key_value_store[key];
+              
+              // Check for lazy expiration
+              if (!vec.empty() && vec[0].hasTTL && std::chrono::steady_clock::now() >= vec[0].expires_at) {
+                  key_value_store.erase(key);
+              } else if (!vec.empty()) {
+                  switch (vec[0].type) {
+                      case KeyType::String:    result = "string";    break;
+                      case KeyType::List:      result = "list";      break;
+                      case KeyType::Set:       result = "set";       break;
+                      case KeyType::Hash:      result = "hash";      break;
+                      case KeyType::VectorSet: result = "vectorset"; break;
+                      // ... handle others ...
+                      default:                 result = "none";      break;
+                  }
+              }
+          }
+
+          std::string resp = "+" + result + "\r\n";
+          send(client_fd, resp.c_str(), resp.length(), 0);
+      }
+
       }
     }
     close(client_fd);
