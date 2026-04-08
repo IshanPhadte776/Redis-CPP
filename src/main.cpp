@@ -318,102 +318,98 @@ void handle_client(int client_fd) {
               expiry_cv.notify_all();
           }
 
-            else if (command == "LRANGE" && request.elements.size() >= 4) {
-              std::string key = request.elements[1].bulkString;
-              long long start = std::stoll(request.elements[2].bulkString);
-              long long stop = std::stoll(request.elements[3].bulkString);
+          else if (command == "LRANGE" && request.elements.size() >= 4) {
+            std::string key = request.elements[1].bulkString;
+            long long start = std::stoll(request.elements[2].bulkString);
+            long long stop = std::stoll(request.elements[3].bulkString);
 
-              std::lock_guard<std::mutex> lock(store_mutex);
+            std::lock_guard<std::mutex> lock(store_mutex);
 
-              if (key_value_store.find(key) == key_value_store.end()) {
-                  send(client_fd, "*0\r\n", 4, 0);
-              } else {
-                  auto& list = key_value_store[key];
-                  long long size = static_cast<long long>(list.size());
+            auto it = key_value_store.find(key);
+            if (it == key_value_store.end() || it->second.type != KeyType::List) {
+                // Redis returns an empty array if key doesn't exist or is the wrong type
+                send(client_fd, "*0\r\n", 4, 0);
+            } else {
+                auto& node = it->second;
+                auto& list = std::get<std::vector<std::string>>(node.value);
+                long long size = static_cast<long long>(list.size());
 
-                  // 1. Convert negative indices to positive
-                  if (start < 0) start = size + start;
-                  if (stop < 0) stop = size + stop;
+                if (start < 0) start = size + start;
+                if (stop < 0) stop = size + stop;
+                if (start < 0) start = 0;
+                if (stop >= size) stop = size - 1;
 
-                  // 2. Clamp boundaries (Redis Behavior)
-                  if (start < 0) start = 0;
-                  if (stop >= size) stop = size - 1;
+                if (start >= size || start > stop) {
+                    send(client_fd, "*0\r\n", 4, 0);
+                } else {
+                    long long count = stop - start + 1;
+                    std::string header = "*" + std::to_string(count) + "\r\n";
+                    send(client_fd, header.c_str(), header.length(), 0);
 
-                  // 3. Final sanity check for empty results
-                  if (start >= size || start > stop) {
-                      send(client_fd, "*0\r\n", 4, 0);
-                  } else {
-                      // 4. Calculate total count for the RESP Array Header
-                      long long count = stop - start + 1;
-                      std::string header = "*" + std::to_string(count) + "\r\n";
-                      send(client_fd, header.c_str(), header.length(), 0);
-
-                      // 5. Stream the elements
-                      for (long long i = start; i <= stop; ++i) {
-                          std::string& val = list[i].value;
-                          std::string element_resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                          send(client_fd, element_resp.c_str(), element_resp.length(), 0);
-                      }
-                  }
-              }
-          }
+                    for (long long i = start; i <= stop; ++i) {
+                        std::string& val = list[i];
+                        std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                        send(client_fd, resp.c_str(), resp.length(), 0);
+                    }
+                }
+            }
+        }
 
           else if (command == "LLEN" && request.elements.size() >= 2) {
               std::string key = request.elements[1].bulkString;
               std::lock_guard<std::mutex> lock(store_mutex);
-              long long len = key_value_store.count(key) ? key_value_store[key].size() : 0;
+              
+              long long len = 0;
+              auto it = key_value_store.find(key);
+              if (it != key_value_store.end() && it->second.type == KeyType::List) {
+                  len = std::get<std::vector<std::string>>(it->second.value).size();
+              }
+              
               std::string resp = ":" + std::to_string(len) + "\r\n";
               send(client_fd, resp.c_str(), resp.length(), 0);
           }
 
           else if (command == "LPOP" && request.elements.size() >= 2) {
-            std::string key = request.elements[1].bulkString;
-            
-            // Determine if 'count' was provided
-            bool has_count = (request.elements.size() >= 3);
-            int count = 1; 
-            if (has_count) {
-                count = std::stoi(request.elements[2].bulkString);
-            }
+              std::string key = request.elements[1].bulkString;
+              bool has_count = (request.elements.size() >= 3);
+              int count = has_count ? std::stoi(request.elements[2].bulkString) : 1;
 
-            std::lock_guard<std::mutex> lock(store_mutex);
+              std::lock_guard<std::mutex> lock(store_mutex);
 
-            // 1. Check if key exists
-            if (key_value_store.find(key) == key_value_store.end()) {
-                send(client_fd, "$-1\r\n", 5, 0); // Nil reply
-            } else {
-                auto& list = key_value_store[key];
+              auto it = key_value_store.find(key);
+              if (it == key_value_store.end()) {
+                  send(client_fd, "$-1\r\n", 5, 0);
+              } else if (it->second.type != KeyType::List) {
+                  send(client_fd, "-WRONGTYPE ...\r\n", 16, 0); // Simplified for brevity
+              } else {
+                  auto& list = std::get<std::vector<std::string>>(it->second.value);
+                  
+                  if (has_count && count <= 0) {
+                      send(client_fd, "*0\r\n", 4, 0);
+                  } else if (!has_count) {
+                      // Single Pop
+                      std::string val = list.front();
+                      list.erase(list.begin());
+                      if (list.empty()) key_value_store.erase(it);
 
-                // 2. Handle non-positive count (Edge Case)
-                if (has_count && count <= 0) {
-                    send(client_fd, "*0\r\n", 4, 0);
-                } 
-                // 3. Single Pop (Standard LPOP)
-                else if (!has_count) {
-                    std::string val = list[0].value;
-                    list.erase(list.begin());
-                    if (list.empty()) key_value_store.erase(key);
+                      std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                      send(client_fd, resp.c_str(), resp.length(), 0);
+                  } else {
+                      // Multi Pop
+                      int actual_to_pop = std::min((int)list.size(), count);
+                      std::string header = "*" + std::to_string(actual_to_pop) + "\r\n";
+                      send(client_fd, header.c_str(), header.length(), 0);
 
-                    std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                    send(client_fd, resp.c_str(), resp.length(), 0);
-                }
-                // 4. Multiple Pop (LPOP key count)
-                else {
-                    int actual_to_pop = std::min((int)list.size(), count);
-                    std::string header = "*" + std::to_string(actual_to_pop) + "\r\n";
-                    send(client_fd, header.c_str(), header.length(), 0);
-
-                    for (int i = 0; i < actual_to_pop; ++i) {
-                        std::string val = list[0].value;
-                        list.erase(list.begin()); // Note: O(N) operation in vector
-                        
-                        std::string element_resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                        send(client_fd, element_resp.c_str(), element_resp.length(), 0);
-                    }
-                    if (list.empty()) key_value_store.erase(key);
-                }
-            }
-        }
+                      for (int i = 0; i < actual_to_pop; ++i) {
+                          std::string val = list.front();
+                          list.erase(list.begin());
+                          std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                          send(client_fd, resp.c_str(), resp.length(), 0);
+                      }
+                      if (list.empty()) key_value_store.erase(it);
+                  }
+              }
+          }
 
         else if (command == "BLPOP" && request.elements.size() >= 3) {
             std::string key = request.elements[1].bulkString;
