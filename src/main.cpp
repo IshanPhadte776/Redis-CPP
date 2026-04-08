@@ -75,11 +75,21 @@ enum class KeyType {
 };
 
 
+struct StreamEntry {
+  std::string id;
+  std::unordered_map<std::string, std::string> fields;  
+};
 
+
+using RedisValue = std::variant<
+    std::string,                    // For SET
+    std::vector<std::string>,       // For LIST (LPUSH/RPUSH)
+    std::vector<StreamEntry>        // For STREAM (XADD)
+>;
 
 
 struct Node {
-    std::string value;    // We definitely still need this for the actual values!
+    RedisValue value;    // We definitely still need this for the actual values!
     KeyType type = KeyType::None;
     std::chrono::steady_clock::time_point expires_at;
     bool hasTTL = false;
@@ -225,11 +235,16 @@ void handle_client(int client_fd) {
                   return;
                 }
 
-                for (size_t i = 2; i < request.elements.size(); ++i) {
-                    Node n;
-                    n.value = request.elements[i].bulkString;
-                    n.type = KeyType::List; // Mark as list
-                    vec.push_back(n);
+                if (vec.type == KeyType::None) {
+                    vec.type = KeyType::List;
+                    vec.value = std::vector<std::string>{};
+                }
+
+                if (std::holds_alternative<std::vector<std::string>>(vec.value)) {
+                    auto& list = std::get<std::vector<std::string>>(vec.value);
+                    for (size_t i = 2; i < request.elements.size(); ++i) {
+                        list.push_back(request.elements[i].bulkString);
+                    }
                 }
                 std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
