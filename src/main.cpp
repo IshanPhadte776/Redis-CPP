@@ -498,17 +498,20 @@ void handle_client(int client_fd) {
       }
 
       else if (command == "XADD" && request.elements.size() >= 3) {
+        std::cout << "[DEBUG] Entering XADD" << std::endl;
         std::string key = request.elements[1].bulkString;
         std::string id_req = request.elements[2].bulkString;
+        std::cout << "[DEBUG] Key: " << key << " ID_Req: " << id_req << std::endl;
 
         std::lock_guard<std::mutex> lock(store_mutex);
         Node &node = key_value_store[key];
 
-        // 1. Type Initialization / Check
         if (node.type == KeyType::None) {
+            std::cout << "[DEBUG] New stream detected" << std::endl;
             node.type = KeyType::Stream;
             node.value = std::vector<StreamEntry>{};
         } else if (node.type != KeyType::Stream) {
+            std::cout << "[DEBUG] WRONGTYPE error" << std::endl;
             std::string err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
             send(client_fd, err.c_str(), err.length(), 0);
             return;
@@ -517,10 +520,11 @@ void handle_client(int client_fd) {
         auto& stream = std::get<std::vector<StreamEntry>>(node.value);
         StreamID last_id = stream.empty() ? StreamID{0, 0} : stream.back().id;
         StreamID final_id;
+        std::cout << "[DEBUG] Last ID in stream: " << last_id.toString() << std::endl;
 
-        // 2. ID Logic (The "Bulletproof" Parser)
         try {
             if (id_req == "*") {
+                std::cout << "[DEBUG] Scenario: Full Auto (*)" << std::endl;
                 long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 final_id.ms = std::max(now_ms, last_id.ms);
@@ -528,8 +532,10 @@ void handle_client(int client_fd) {
                 if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
             } 
             else if (id_req.find("-*") != std::string::npos) {
+                std::cout << "[DEBUG] Scenario: Partial Auto (ms-*)" << std::endl;
                 long long req_ms = std::stoll(id_req.substr(0, id_req.find("-*")));
                 if (req_ms < last_id.ms) {
+                    std::cout << "[DEBUG] Error: ms too small" << std::endl;
                     std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
                     send(client_fd, err.c_str(), err.length(), 0);
                     return;
@@ -539,42 +545,41 @@ void handle_client(int client_fd) {
                 if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
             } 
             else {
+                std::cout << "[DEBUG] Scenario: Explicit ID" << std::endl;
                 final_id = StreamID::parse(id_req);
-                // Validation 1: Must be > 0-0
+                std::cout << "[DEBUG] Parsed final_id: " << final_id.toString() << std::endl;
+
                 if (final_id.ms == 0 && final_id.seq == 0) {
+                    std::cout << "[DEBUG] Error: ID is 0-0" << std::endl;
                     std::string err = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
                     send(client_fd, err.c_str(), err.length(), 0);
                     return;
                 }
-                // Validation 2: Monotonicity (The 0-3 vs 1-2 test)
+                
+                // PAY ATTENTION HERE: This is where 0-3 vs 1-2 should fail
                 if (!stream.empty() && !(final_id > last_id)) {
+                    std::cout << "[DEBUG] Error: ID not monotonic. final_id <= last_id" << std::endl;
                     std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
                     send(client_fd, err.c_str(), err.length(), 0);
                     return;
                 }
             }
-        } catch (...) {
-            // If stoll fails or anything weird happens, tell the client!
-            std::string err = "-ERR Invalid stream ID format\r\n";
-            send(client_fd, err.c_str(), err.length(), 0);
-            return;
+        } catch (const std::exception& e) {
+            std::cerr << "[CRASH] Exception in ID logic: " << e.what() << std::endl;
+            return; // This would cause "no content received"
         }
 
-        // 3. Store the Entry
+        std::cout << "[DEBUG] Validation passed. Saving entry." << std::endl;
         StreamEntry entry;
         entry.id = final_id;
         for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
-            // This now works because fields is a std::vector
-            entry.fields.push_back({
-                request.elements[i].bulkString, 
-                request.elements[i+1].bulkString
-            });
+            entry.fields.push_back({request.elements[i].bulkString, request.elements[i+1].bulkString});
         }
         stream.push_back(entry);
 
-        // 4. Final Response
         std::string id_str = final_id.toString();
         std::string resp = "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+        std::cout << "[DEBUG] Sending response: " << id_str << std::endl;
         send(client_fd, resp.c_str(), resp.length(), 0);
         
         expiry_cv.notify_all();
