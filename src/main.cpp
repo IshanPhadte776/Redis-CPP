@@ -100,7 +100,7 @@ struct StreamID {
 
 struct StreamEntry {
   StreamID id;
-  std::unordered_map<std::string, std::string> fields;  
+  std::vector<std::pair<std::string, std::string>> fields;
 };
 
 
@@ -564,7 +564,11 @@ void handle_client(int client_fd) {
         StreamEntry entry;
         entry.id = final_id;
         for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
-            entry.fields.push_back({request.elements[i].bulkString, request.elements[i+1].bulkString});
+            // This now works because fields is a std::vector
+            entry.fields.push_back({
+                request.elements[i].bulkString, 
+                request.elements[i+1].bulkString
+            });
         }
         stream.push_back(entry);
 
