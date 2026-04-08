@@ -263,11 +263,6 @@ void handle_client(int client_fd) {
                 std::lock_guard<std::mutex> lock(store_mutex);
                 Node &node = key_value_store[key];
 
-                if (!vec.empty() && vec[0].type != KeyType::List) {
-                  send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
-                  return;
-                }
-
                 // 1. Initialize if new key
                 if (node.type == KeyType::None) {
                     node.type = KeyType::List;
