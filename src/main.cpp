@@ -657,12 +657,12 @@ void handle_client(int client_fd) {
         }
     }
 }
-
-else if (command == "XREAD" && request.elements.size() >= 4) {
-    long long block_ms = -1; // -1 means no blocking
+else if (command == "XREAD") {
+    std::cout << "[DEBUG] Entering XREAD" << std::endl;
+    long long block_ms = -1; 
     int streams_keyword_pos = -1;
 
-    // 1. Parse Arguments (Handling BLOCK)
+    // 1. Parse Arguments
     for (size_t i = 1; i < request.elements.size(); ++i) {
         std::string arg = request.elements[i].bulkString;
         std::transform(arg.begin(), arg.end(), arg.begin(), ::toupper);
@@ -671,6 +671,8 @@ else if (command == "XREAD" && request.elements.size() >= 4) {
         }
         if (arg == "STREAMS") streams_keyword_pos = i;
     }
+
+    if (streams_keyword_pos == -1) return; // Should not happen with valid RESP
 
     int num_keys = (request.elements.size() - (streams_keyword_pos + 1)) / 2;
     std::vector<std::string> keys;
@@ -682,7 +684,7 @@ else if (command == "XREAD" && request.elements.size() >= 4) {
 
     std::unique_lock<std::mutex> lock(store_mutex);
 
-    // 2. Resolve "$" IDs to the current top of the stream
+    // 2. Resolve IDs (Handle "$")
     std::vector<StreamID> start_ids;
     for (int i = 0; i < num_keys; ++i) {
         if (raw_ids[i] == "$") {
@@ -695,9 +697,10 @@ else if (command == "XREAD" && request.elements.size() >= 4) {
         } else {
             start_ids.push_back(StreamID::parseRange(raw_ids[i], false));
         }
+        std::cout << "[DEBUG] XREAD Key: " << keys[i] << " Start ID: " << start_ids[i].toString() << std::endl;
     }
 
-    // 3. Predicate: Is there any new data (> start_id) in any of the keys?
+    // 3. The Predicate: Do any of our keys have data > start_id?
     auto has_new_data = [&]() {
         for (int i = 0; i < num_keys; ++i) {
             if (key_value_store.count(keys[i]) && key_value_store[keys[i]].type == KeyType::Stream) {
@@ -708,21 +711,58 @@ else if (command == "XREAD" && request.elements.size() >= 4) {
         return false;
     };
 
-    // 4. Blocking Logic
+    // 4. Blocking logic
     if (block_ms >= 0 && !has_new_data()) {
+        std::cout << "[DEBUG] No data yet, blocking for " << block_ms << "ms" << std::endl;
         if (block_ms == 0) {
             expiry_cv.wait(lock, has_new_data);
         } else {
             expiry_cv.wait_for(lock, std::chrono::milliseconds(block_ms), has_new_data);
         }
+        std::cout << "[DEBUG] Woke up from block!" << std::endl;
     }
 
-    // 5. Generate Response (Same as your previous XREAD logic)
+    // 5. Final check and Response Generation
     if (!has_new_data()) {
-        send(client_fd, "$-1\r\n", 5, 0); // Null bulk string for timeout
+        std::cout << "[DEBUG] Timeout reached, sending NULL" << std::endl;
+        send(client_fd, "$-1\r\n", 5, 0);
     } else {
-        // ... Build your nested RESP array for the keys that have data ...
-        // (Remember to only include entries WHERE entry.id > start_ids[i])
+        std::cout << "[DEBUG] Data found! Building response array" << std::endl;
+        // Count how many streams actually have new data
+        std::vector<int> active_stream_indices;
+        for (int i = 0; i < num_keys; ++i) {
+            if (key_value_store.count(keys[i])) {
+                auto& stream = std::get<std::vector<StreamEntry>>(key_value_store[keys[i]].value);
+                if (!stream.empty() && stream.back().id > start_ids[i]) {
+                    active_stream_indices.push_back(i);
+                }
+            }
+        }
+
+        std::string final_resp = "*" + std::to_string(active_stream_indices.size()) + "\r\n";
+        for (int idx : active_stream_indices) {
+            final_resp += "*2\r\n";
+            final_resp += "$" + std::to_string(keys[idx].length()) + "\r\n" + keys[idx] + "\r\n";
+            
+            auto& stream = std::get<std::vector<StreamEntry>>(key_value_store[keys[idx]].value);
+            auto start_it = std::upper_bound(stream.begin(), stream.end(), start_ids[idx], 
+                [](const StreamID& id, const StreamEntry& e) { return id < e.id; });
+
+            long long entry_count = std::distance(start_it, stream.end());
+            final_resp += "*" + std::to_string(entry_count) + "\r\n";
+
+            for (auto it = start_it; it != stream.end(); ++it) {
+                final_resp += "*2\r\n";
+                std::string id_str = it->id.toString();
+                final_resp += "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+                final_resp += "*" + std::to_string(it->fields.size() * 2) + "\r\n";
+                for (auto& p : it->fields) {
+                    final_resp += "$" + std::to_string(p.first.length()) + "\r\n" + p.first + "\r\n";
+                    final_resp += "$" + std::to_string(p.second.length()) + "\r\n" + p.second + "\r\n";
+                }
+            }
+        }
+        send(client_fd, final_resp.c_str(), final_resp.length(), 0);
     }
 }
 
