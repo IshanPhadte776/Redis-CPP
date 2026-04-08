@@ -75,9 +75,54 @@
 // };
 
 
+// struct StreamID {
+//     long long ms = 0;
+//     long long seq = 0;
+
+//     static StreamID parse(const std::string& s) {
+//         size_t dash = s.find('-');
+//         if (dash == std::string::npos) return {0, 0};
+//         try {
+//             return {std::stoll(s.substr(0, dash)), std::stoll(s.substr(dash + 1))};
+//         } catch (...) { return {0, 0}; }
+//     }
+
+//     static StreamID parseRange(const std::string& s, bool is_start) {
+//         if (s == "-") return {0, 0};
+//         if (s == "+") return {LLONG_MAX, LLONG_MAX};
+
+//         size_t dash = s.find('-');
+//         if (dash == std::string::npos) {
+//             // No sequence provided
+//             return {std::stoll(s), is_start ? 0 : LLONG_MAX};
+//         }
+//         return {std::stoll(s.substr(0, dash)), std::stoll(s.substr(dash + 1))};
+//     }
+
+//     std::string toString() const {
+//         return std::to_string(ms) + "-" + std::to_string(seq);
+//     }
+
+//     // Monotonicity check: New ID must be strictly greater than last ID
+//     bool operator>(const StreamID& other) const {
+//         if (ms != other.ms) return ms > other.ms;
+//         return seq > other.seq;
+//     }
+
+//     // Comparison for binary search
+//     bool operator<(const StreamID& other) const {
+//         if (ms != other.ms) return ms < other.ms;
+//         return seq < other.seq;
+//     }
+//     bool operator<=(const StreamID& other) const {
+//         if (ms != other.ms) return ms < other.ms;
+//         return seq <= other.seq;
+//     }
+// };
+
 // struct StreamEntry {
-//   std::string id;
-//   std::unordered_map<std::string, std::string> fields;  
+//   StreamID id;
+//   std::vector<std::pair<std::string, std::string>> fields;
 // };
 
 
@@ -474,48 +519,210 @@
 //           send(client_fd, resp.c_str(), resp.length(), 0);
 //       }
 
-//       else if (command == "XADD" && request.elements.size() >= 4) {
-//           std::string key = request.elements[1].bulkString;
-//           std::string id_req = request.elements[2].bulkString;
+//       else if (command == "XADD" && request.elements.size() >= 3) {
+//         std::cout << "[DEBUG] Entering XADD" << std::endl;
+//         std::string key = request.elements[1].bulkString;
+//         std::string id_req = request.elements[2].bulkString;
+//         std::cout << "[DEBUG] Key: " << key << " ID_Req: " << id_req << std::endl;
 
-//           std::lock_guard<std::mutex> lock(store_mutex);
-//           Node &node = key_value_store[key];
+//         std::lock_guard<std::mutex> lock(store_mutex);
+//         Node &node = key_value_store[key];
 
-//           if (node.type == KeyType::None) {
-//               node.type = KeyType::Stream;
-//               node.value = std::vector<StreamEntry>{};
-//           } else if (node.type != KeyType::Stream) {
-//               send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
-//               return;
-//           }
+//         if (node.type == KeyType::None) {
+//             std::cout << "[DEBUG] New stream detected" << std::endl;
+//             node.type = KeyType::Stream;
+//             node.value = std::vector<StreamEntry>{};
+//         } else if (node.type != KeyType::Stream) {
+//             std::cout << "[DEBUG] WRONGTYPE error" << std::endl;
+//             std::string err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+//             send(client_fd, err.c_str(), err.length(), 0);
+//             return;
+//         }
 
-//           auto& stream = std::get<std::vector<StreamEntry>>(node.value);
-          
-//           // Generate ID if '*'
-//           std::string final_id = id_req;
-//           if (id_req == "*") {
-//               auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-//                   std::chrono::system_clock::now().time_since_epoch()).count();
-//               final_id = std::to_string(now) + "-0";
-//           }
+//         auto& stream = std::get<std::vector<StreamEntry>>(node.value);
+//         StreamID last_id = stream.empty() ? StreamID{0, 0} : stream.back().id;
+//         StreamID final_id;
+//         std::cout << "[DEBUG] Last ID in stream: " << last_id.toString() << std::endl;
 
-//           // Monotonicity check
-//           if (!stream.empty() && final_id <= stream.back().id) {
-//               send(client_fd, "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n", 82, 0);
-//               return;
-//           }
+//         try {
+//             if (id_req == "*") {
+//                 std::cout << "[DEBUG] Scenario: Full Auto (*)" << std::endl;
+//                 long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+//                     std::chrono::system_clock::now().time_since_epoch()).count();
+//                 final_id.ms = std::max(now_ms, last_id.ms);
+//                 final_id.seq = (final_id.ms == last_id.ms) ? last_id.seq + 1 : 0;
+//                 if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
+//             } 
+//             else if (id_req.find("-*") != std::string::npos) {
+//                 std::cout << "[DEBUG] Scenario: Partial Auto (ms-*)" << std::endl;
+//                 long long req_ms = std::stoll(id_req.substr(0, id_req.find("-*")));
+//                 if (req_ms < last_id.ms) {
+//                     std::cout << "[DEBUG] Error: ms too small" << std::endl;
+//                     std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+//                     send(client_fd, err.c_str(), err.length(), 0);
+//                     return;
+//                 }
+//                 final_id.ms = req_ms;
+//                 final_id.seq = (req_ms == last_id.ms) ? last_id.seq + 1 : 0;
+//                 if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
+//             } 
+//             else {
+//                 std::cout << "[DEBUG] Scenario: Explicit ID" << std::endl;
+//                 final_id = StreamID::parse(id_req);
+//                 std::cout << "[DEBUG] Parsed final_id: " << final_id.toString() << std::endl;
 
-//           StreamEntry entry;
-//           entry.id = final_id;
-//           for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
-//               entry.fields[request.elements[i].bulkString] = request.elements[i+1].bulkString;
-//           }
-//           stream.push_back(entry);
+//                 if (final_id.ms == 0 && final_id.seq == 0) {
+//                     std::cout << "[DEBUG] Error: ID is 0-0" << std::endl;
+//                     std::string err = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+//                     send(client_fd, err.c_str(), err.length(), 0);
+//                     continue;
+//                 }
+                
+//                 // PAY ATTENTION HERE: This is where 0-3 vs 1-2 should fail
+//                 if (!stream.empty() && !(final_id > last_id)) {
+//                     std::cout << "[DEBUG] Error: ID not monotonic. final_id <= last_id" << std::endl;
+//                     std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+//                     send(client_fd, err.c_str(), err.length(), 0);
+//                     continue;
+//                 }
+//             }
+//         } catch (const std::exception& e) {
+//             std::cerr << "[CRASH] Exception in ID logic: " << e.what() << std::endl;
+//             return; // This would cause "no content received"
+//         }
 
-//           std::string resp = "$" + std::to_string(final_id.length()) + "\r\n" + final_id + "\r\n";
-//           send(client_fd, resp.c_str(), resp.length(), 0);
-//           expiry_cv.notify_all(); // Notify any XREAD waiters
-//       }
+//         std::cout << "[DEBUG] Validation passed. Saving entry." << std::endl;
+//         StreamEntry entry;
+//         entry.id = final_id;
+//         for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
+//             entry.fields.push_back({request.elements[i].bulkString, request.elements[i+1].bulkString});
+//         }
+//         stream.push_back(entry);
+
+//         std::string id_str = final_id.toString();
+//         std::string resp = "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+//         std::cout << "[DEBUG] Sending response: " << id_str << std::endl;
+//         send(client_fd, resp.c_str(), resp.length(), 0);
+        
+//         expiry_cv.notify_all();
+//     }
+
+//     else if (command == "XRANGE" && request.elements.size() >= 4) {
+//     std::string key = request.elements[1].bulkString;
+//     StreamID start_id = StreamID::parseRange(request.elements[2].bulkString, true);
+//     StreamID end_id = StreamID::parseRange(request.elements[3].bulkString, false);
+
+//     std::lock_guard<std::mutex> lock(store_mutex);
+    
+//     auto it = key_value_store.find(key);
+//     if (it == key_value_store.end() || it->second.type != KeyType::Stream) {
+//         send(client_fd, "*0\r\n", 4, 0);
+//     } else {
+//         auto& stream = std::get<std::vector<StreamEntry>>(it->second.value);
+
+//         // 1. Binary Search for the start iterator (First element >= start_id)
+//         auto start_it = std::lower_bound(stream.begin(), stream.end(), start_id, 
+//             [](const StreamEntry& e, const StreamID& id) { return e.id < id; });
+
+//         // 2. Binary Search for the end iterator (First element > end_id)
+//         auto end_it = std::upper_bound(stream.begin(), stream.end(), end_id, 
+//             [](const StreamID& id, const StreamEntry& e) { return id < e.id; });
+
+//         // 3. Calculate count and send RESP Array Header
+//         long long count = std::distance(start_it, end_it);
+//         if (count < 0) count = 0;
+        
+//         std::string header = "*" + std::to_string(count) + "\r\n";
+//         send(client_fd, header.c_str(), header.length(), 0);
+
+//         // 4. Loop through the range
+//         for (auto entry_it = start_it; entry_it != end_it; ++entry_it) {
+//             const auto& entry = *entry_it;
+            
+//             // Each entry is an array: [ID, [field1, value1, field2, value2...]]
+//             std::string entry_resp = "*2\r\n";
+            
+//             // Send ID
+//             std::string id_str = entry.id.toString();
+//             entry_resp += "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+            
+//             // Send Fields Array
+//             entry_resp += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
+//             for (const auto& pair : entry.fields) {
+//                 entry_resp += "$" + std::to_string(pair.first.length()) + "\r\n" + pair.first + "\r\n";
+//                 entry_resp += "$" + std::to_string(pair.second.length()) + "\r\n" + pair.second + "\r\n";
+//             }
+            
+//             send(client_fd, entry_resp.c_str(), entry_resp.length(), 0);
+//         }
+//     }
+// }
+
+//   else if (command == "XREAD" && request.elements.size() >= 4) {
+//     // 1. Find the "STREAMS" keyword and calculate how many keys we have
+//     int streams_keyword_pos = -1;
+//     for (size_t i = 1; i < request.elements.size(); ++i) {
+//         std::string arg = request.elements[i].bulkString;
+//         std::transform(arg.begin(), arg.end(), arg.begin(), ::toupper);
+//         if (arg == "STREAMS") {
+//             streams_keyword_pos = i;
+//             break;
+//         }
+//     }
+
+//     // Number of keys = (Total elements - (position of STREAMS + 1)) / 2
+//     int num_keys = (request.elements.size() - (streams_keyword_pos + 1)) / 2;
+//     std::vector<std::string> keys;
+//     std::vector<StreamID> start_ids;
+
+//     for (int i = 0; i < num_keys; ++i) {
+//         keys.push_back(request.elements[streams_keyword_pos + 1 + i].bulkString);
+//         start_ids.push_back(StreamID::parseRange(request.elements[streams_keyword_pos + 1 + num_keys + i].bulkString, false));
+//     }
+
+//     std::lock_guard<std::mutex> lock(store_mutex);
+    
+//     // START RESP: Level 1 - Array of Streams
+//     std::string final_resp = "*" + std::to_string(num_keys) + "\r\n";
+
+//     for (int i = 0; i < num_keys; ++i) {
+//         std::string key = keys[i];
+//         StreamID last_id = start_ids[i];
+
+//         // Level 2 - The Stream [Key, Entries]
+//         final_resp += "*2\r\n";
+//         final_resp += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
+
+//         auto it = key_value_store.find(key);
+//         if (it == key_value_store.end() || it->second.type != KeyType::Stream) {
+//             final_resp += "*0\r\n"; // No entries found
+//         } else {
+//             auto& stream = std::get<std::vector<StreamEntry>>(it->second.value);
+            
+//             // XREAD is strictly exclusive (>). upper_bound finds first element > last_id
+//             auto start_it = std::upper_bound(stream.begin(), stream.end(), last_id, 
+//                 [](const StreamID& id, const StreamEntry& e) { return id < e.id; });
+
+//             long long entry_count = std::distance(start_it, stream.end());
+//             final_resp += "*" + std::to_string(entry_count) + "\r\n";
+
+//             for (auto entry_it = start_it; entry_it != stream.end(); ++entry_it) {
+//                 // Level 3 - The Entry [ID, Fields]
+//                 final_resp += "*2\r\n";
+//                 std::string id_str = entry_it->id.toString();
+//                 final_resp += "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+
+//                 // Level 4 - The Data [f1, v1, f2, v2...]
+//                 final_resp += "*" + std::to_string(entry_it->fields.size() * 2) + "\r\n";
+//                 for (auto& pair : entry_it->fields) {
+//                     final_resp += "$" + std::to_string(pair.first.length()) + "\r\n" + pair.first + "\r\n";
+//                     final_resp += "$" + std::to_string(pair.second.length()) + "\r\n" + pair.second + "\r\n";
+//                 }
+//             }
+//         }
+//     }
+//     send(client_fd, final_resp.c_str(), final_resp.length(), 0);
+// }
 
 //       }
 //     }
