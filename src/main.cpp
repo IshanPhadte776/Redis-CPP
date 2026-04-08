@@ -766,6 +766,61 @@ else if (command == "XREAD") {
     }
 }
 
+else if (command == "INCR" && request.elements.size() >= 2) {
+    std::string key = request.elements[1].bulkString;
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+    
+    // 1. Check if key exists
+    if (key_value_store.find(key) == key_value_store.end()) {
+        // Case: Key doesn't exist. Create it with "1"
+        Node n;
+        n.type = KeyType::String;
+        n.value = "1"; 
+        n.hasTTL = false;
+        key_value_store[key] = n;
+
+        send(client_fd, ":1\r\n", 4, 0);
+    } 
+    else {
+        Node &node = key_value_store[key];
+
+        // 2. Type Check: Must be a String
+        if (node.type != KeyType::String) {
+            std::string err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+            send(client_fd, err.c_str(), err.length(), 0);
+        } 
+        else {
+            // 3. Extract string and attempt to parse as integer
+            std::string& val_str = std::get<std::string>(node.value);
+            
+            try {
+                size_t processed_char_count = 0;
+                long long current_val = std::stoll(val_str, &processed_char_count);
+
+                // Strict Check: stoll can parse "10hello" as 10. 
+                // Redis requires the WHOLE string to be the number.
+                if (processed_char_count != val_str.length()) {
+                    throw std::invalid_argument("trailing characters");
+                }
+
+                // 4. Increment and update
+                current_val++;
+                node.value = std::to_string(current_val);
+
+                // 5. Respond with Integer RESP (starts with ':')
+                std::string resp = ":" + std::to_string(current_val) + "\r\n";
+                send(client_fd, resp.c_str(), resp.length(), 0);
+
+            } catch (...) {
+                // Catches stoll failures (non-numeric strings) and overflows
+                std::string err = "-ERR value is not an integer or out of range\r\n";
+                send(client_fd, err.c_str(), err.length(), 0);
+            }
+        }
+    }
+}
+
       }
     }
     close(client_fd);
