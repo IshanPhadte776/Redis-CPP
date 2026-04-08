@@ -135,22 +135,33 @@ std::string typeToString(KeyType t) {
 // ==========================================
 void background_cleanup() {
     while (true) {
+        // Sleep for a short interval to avoid hammering the CPU
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
         auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(store_mutex);
 
         while (!expiry_heap.empty() && expiry_heap.top().expires_at <= now) {
-            std::string key = expiry_heap.top().key;
+            // Get the "next to die" entry
+            ExpiryEntry entry = expiry_heap.top();
             expiry_heap.pop();
 
-            if (key_value_store.count(key)) {
-                auto &vec = key_value_store[key];
-                // Remove individual expired nodes from the vector
-                vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const Node& n) {
-                    return n.hasTTL && n.expires_at <= now;
-                }), vec.end());
+            // 1. Check if the key still exists in the store
+            if (key_value_store.count(entry.key)) {
+                Node& node = key_value_store[entry.key];
 
-                if (vec.empty()) key_value_store.erase(key);
+                // 2. The "Double Check" Logic:
+                // If a user ran 'SET key val EX 10' then immediately 'SET key val EX 100',
+                // the heap now has TWO entries for the same key. We only delete if 
+                // the node's current expires_at matches the one we just popped.
+                if (node.hasTTL && node.expires_at == entry.expires_at) {
+                    key_value_store.erase(entry.key);
+                    std::cout << "[Cleanup] Evicted expired key: " << entry.key << "\n";
+                    
+                    // Optional: If this was a List/Stream, we might need to notify 
+                    // blocked clients that the data is gone (though usually not required for TTL)
+                    expiry_cv.notify_all(); 
+                }
             }
         }
     }
