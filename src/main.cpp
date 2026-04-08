@@ -76,23 +76,25 @@ enum class KeyType {
 
 
 struct StreamID {
-    long long ms;
-    long long seq;
+    long long ms = 0;
+    long long seq = 0;
 
-    // Helper to parse "123-456"
     static StreamID parse(const std::string& s) {
         size_t dash = s.find('-');
         if (dash == std::string::npos) return {0, 0};
-        return {std::stoll(s.substr(0, dash)), std::stoll(s.substr(dash + 1))};
+        try {
+            return {std::stoll(s.substr(0, dash)), std::stoll(s.substr(dash + 1))};
+        } catch (...) { return {0, 0}; }
     }
 
     std::string toString() const {
         return std::to_string(ms) + "-" + std::to_string(seq);
     }
 
-    bool operator<=(const StreamID& other) const {
-        if (ms != other.ms) return ms < other.ms;
-        return seq <= other.seq;
+    // Overload the > operator for the monotonicity check
+    bool operator>(const StreamID& other) const {
+        if (ms != other.ms) return ms > other.ms;
+        return seq > other.seq;
     }
 };
 
@@ -512,57 +514,55 @@ void handle_client(int client_fd) {
         }
 
         auto& stream = std::get<std::vector<StreamEntry>>(node.value);
-        StreamID last_id = stream.empty() ? StreamID{0, 0} : StreamID::parse(stream.back().id);
+    
+        // FIX 1: entry.id is already a StreamID, no need to parse!
+        StreamID last_id = stream.empty() ? StreamID{0, 0} : stream.back().id;
         StreamID final_id;
 
-        // --- Scenario 1: Full Auto-Generate (*) ---
         if (id_req == "*") {
             long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
-            
             final_id.ms = std::max(now_ms, last_id.ms);
             final_id.seq = (final_id.ms == last_id.ms) ? last_id.seq + 1 : 0;
-            
-            // Special Case: 0-0 is not allowed even for auto-gen
             if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
         } 
-        // --- Scenario 2: Auto-Sequence (ms-*) ---
         else if (id_req.find("-*") != std::string::npos) {
             long long req_ms = std::stoll(id_req.substr(0, id_req.find("-*")));
-            
             if (req_ms < last_id.ms) {
                 send(client_fd, "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n", 82, 0);
                 return;
             }
-            
             final_id.ms = req_ms;
             final_id.seq = (req_ms == last_id.ms) ? last_id.seq + 1 : 0;
-            
             if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
         } 
-        // --- Scenario 3: Explicit ID (ms-seq) ---
         else {
             final_id = StreamID::parse(id_req);
-            if (final_id.ms == 0 && final_id.seq == 0) {
+            // FIX 2: Use the overloaded > operator
+            if (!(final_id > StreamID{0, 0})) {
                 send(client_fd, "-ERR The ID specified in XADD must be greater than 0-0\r\n", 56, 0);
                 return;
             }
-            if (!stream.empty() && final_id <= last_id) {
+            if (!stream.empty() && !(final_id > last_id)) {
                 send(client_fd, "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n", 82, 0);
                 return;
             }
         }
 
-        // Storage Logic
         StreamEntry entry;
-        entry.id = final_id.toString();
+        // FIX 3: entry.id is a StreamID, final_id is a StreamID. Simple assignment!
+        entry.id = final_id; 
+        
         for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
             entry.fields[request.elements[i].bulkString] = request.elements[i+1].bulkString;
         }
         stream.push_back(entry);
 
-        std::string resp = "$" + std::to_string(entry.id.length()) + "\r\n" + entry.id + "\r\n";
+        // FIX 4: Convert to string only when sending to the client
+        std::string final_id_str = final_id.toString();
+        std::string resp = "$" + std::to_string(final_id_str.length()) + "\r\n" + final_id_str + "\r\n";
         send(client_fd, resp.c_str(), resp.length(), 0);
+        
         expiry_cv.notify_all();
     }
 
