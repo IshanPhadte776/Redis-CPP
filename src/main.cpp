@@ -194,48 +194,70 @@ void handle_client(int client_fd) {
             else if (command == "SET" && request.elements.size() >= 3) {
                 std::string key = request.elements[1].bulkString;
                 std::string val = request.elements[2].bulkString;
-                Node n; n.value = val; n.hasTTL = false; n.type = KeyType::String;
 
+                Node n;
+                n.value = val;           // Variant automatically becomes std::string
+                n.type = KeyType::String;
+                n.hasTTL = false;
+
+                // Handle EX (seconds) and PX (milliseconds)
                 if (request.elements.size() >= 5) {
                     std::string flag = request.elements[3].bulkString;
                     for (auto &c : flag) c = toupper(c);
-                    long long ms = std::stoll(request.elements[4].bulkString);
-                    if (flag == "EX") ms *= 1000;
 
-                    n.hasTTL = true;
-                    n.expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-                    
-                    std::lock_guard<std::mutex> lock(store_mutex);
-                    expiry_heap.push({key, n.expires_at});
-                    key_value_store[key] = { n }; // SET overwrites key with 1-node vector
-                } else {
-                    std::lock_guard<std::mutex> lock(store_mutex);
-                    key_value_store[key] = { n };
-                }
-                send(client_fd, "+OK\r\n", 5, 0);
-            } 
-            else if (command == "GET" && request.elements.size() >= 2) {
-                std::string key = request.elements[1].bulkString;
-                std::string result = "";
-                bool found = false;
+                    try {
+                        long long ms = std::stoll(request.elements[4].bulkString);
+                        if (flag == "EX") ms *= 1000;
 
-                std::lock_guard<std::mutex> lock(store_mutex);
-                if (key_value_store.count(key) && !key_value_store[key].empty()) {
-                    Node &node = key_value_store[key];
-                    if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
-                        key_value_store.erase(key);
-                    } else {
-                        result = node.value;
-                        found = true;
+                        n.hasTTL = true;
+                        n.expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+                    } catch (...) {
+                        send(client_fd, "-ERR value is not an integer or out of range\r\n", 46, 0);
+                        continue;
                     }
                 }
-                if (found) {
-                    std::string resp = "$" + std::to_string(result.length()) + "\r\n" + result + "\r\n";
-                    send(client_fd, resp.c_str(), resp.length(), 0);
-                } else {
-                    send(client_fd, "$-1\r\n", 5, 0);
+
+                {
+                    std::lock_guard<std::mutex> lock(store_mutex);
+                    // Overwrite whatever was there (String, List, or Stream)
+                    key_value_store[key] = n; 
+                    
+                    if (n.hasTTL) {
+                        expiry_heap.push({key, n.expires_at});
+                    }
                 }
-            } 
+                send(client_fd, "+OK\r\n", 5, 0);
+            }
+            else if (command == "GET" && request.elements.size() >= 2) {
+                std::string key = request.elements[1].bulkString;
+                std::lock_guard<std::mutex> lock(store_mutex);
+
+                // 1. Check if key exists
+                if (key_value_store.find(key) == key_value_store.end()) {
+                    send(client_fd, "$-1\r\n", 5, 0);
+                } 
+                else {
+                    Node &node = key_value_store[key];
+
+                    // 2. Lazy Expiration Check
+                    if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
+                        key_value_store.erase(key);
+                        send(client_fd, "$-1\r\n", 5, 0);
+                    } 
+                    // 3. Type Safety Check (SWE 3 Requirement)
+                    else if (node.type != KeyType::String) {
+                        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+                        send(client_fd, err, strlen(err), 0);
+                    } 
+                    // 4. Extract and Send
+                    else {
+                        // Use std::get to pull the string out of the variant
+                        std::string& result = std::get<std::string>(node.value);
+                        std::string resp = "$" + std::to_string(result.length()) + "\r\n" + result + "\r\n";
+                        send(client_fd, resp.c_str(), resp.length(), 0);
+                    }
+                }
+            }
             else if (command == "RPUSH" && request.elements.size() >= 3) {
                 std::string key = request.elements[1].bulkString;
                 std::lock_guard<std::mutex> lock(store_mutex);
