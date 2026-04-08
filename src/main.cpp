@@ -72,7 +72,7 @@ enum class KeyType {
   Hash, // Created via HSET
   Stream, // Created via XADD
   VectorSet, // Created via VADD (Hypothetical Command for Vector Similarity Search)
-}
+};
 
 
 
