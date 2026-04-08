@@ -106,7 +106,7 @@ struct ExpiryEntry {
 };
 
 // Map: Key Name -> Vector of Nodes
-std::unordered_map<std::string, std::vector<Node>> key_value_store;
+std::unordered_map<std::string, Node> key_value_store;
 std::mutex store_mutex;
 
 std::condition_variable expiry_cv;
@@ -210,7 +210,7 @@ void handle_client(int client_fd) {
 
                 std::lock_guard<std::mutex> lock(store_mutex);
                 if (key_value_store.count(key) && !key_value_store[key].empty()) {
-                    Node &node = key_value_store[key][0];
+                    Node &node = key_value_store[key];
                     if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
                         key_value_store.erase(key);
                     } else {
@@ -434,6 +434,40 @@ void handle_client(int client_fd) {
           std::string resp = "+" + result + "\r\n";
           send(client_fd, resp.c_str(), resp.length(), 0);
       }
+
+      else if (command == "XADD" && request.elements.size() >= 4) {
+        std::string key = request.elements[1].bulkString;
+        std::string id = request.elements[2].bulkString;
+
+        std::lock_guard<std::mutex> lock(store_mutex);
+        auto& node = key_value_store[key];
+
+        if (node.type == KeyType::None) {
+            node.type = KeyType::Stream;
+            node.value = std::vector<StreamEntry>{};
+        } else if (node.type != KeyType::Stream) {
+            send(client_fd, "-WRONGTYPE ...\r\n", 68, 0);
+            return;
+        }
+
+        auto& stream = std::get<std::vector<StreamEntry>>(node.value);
+        
+        // Simple Monotonicity Check
+        if (!stream.empty() && id <= stream.back().id && id != "*") {
+            send(client_fd, "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n", 82, 0);
+            return;
+        }
+
+        StreamEntry entry;
+        entry.id = (id == "*") ? std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-0" : id;
+        for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
+            entry.fields[request.elements[i].bulkString] = request.elements[i+1].bulkString;
+        }
+        stream.push_back(entry);
+
+        std::string resp = "$" + std::to_string(entry.id.length()) + "\r\n" + entry.id + "\r\n";
+        send(client_fd, resp.c_str(), resp.length(), 0);
+    }
 
       }
     }
