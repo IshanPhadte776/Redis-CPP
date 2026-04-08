@@ -241,8 +241,17 @@ void handle_client(int client_fd) {
                 std::string key = request.elements[1].bulkString;
                 std::lock_guard<std::mutex> lock(store_mutex);
                 auto &vec = key_value_store[key];
+
+                if (!vec.empty() && vec[0].type != KeyType::List) {
+                    send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
+                    return;
+                }
+
                 for (size_t i = 2; i < request.elements.size(); ++i) {
-                    vec.insert(vec.begin(), {request.elements[i].bulkString, {}, false});
+                    Node n;
+                    n.value = request.elements[i].bulkString;
+                    n.type = KeyType::List; // Mark as list
+                    vec.push_back(n);
                 }
                 std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
