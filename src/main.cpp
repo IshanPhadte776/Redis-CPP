@@ -251,7 +251,7 @@ void handle_client(int client_fd) {
                     Node n;
                     n.value = request.elements[i].bulkString;
                     n.type = KeyType::List; // Mark as list
-                    vec.push_back(n);
+                    vec.insert(vec.begin(), n);
                 }
                 std::string resp = ":" + std::to_string(vec.size()) + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
