@@ -725,7 +725,7 @@ else if (command == "XREAD") {
     // 5. Final check and Response Generation
     if (!has_new_data()) {
         std::cout << "[DEBUG] Timeout reached, sending NULL" << std::endl;
-        send(client_fd, "$-1\r\n", 5, 0);
+        send(client_fd, "*-1\r\n", 5, 0); // Null Array is the correct type for XREAD
     } else {
         std::cout << "[DEBUG] Data found! Building response array" << std::endl;
         // Count how many streams actually have new data
