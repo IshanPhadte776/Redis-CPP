@@ -189,8 +189,6 @@ void handle_client(int client_fd) {
                     key_value_store[key] = { n }; // SET overwrites key with 1-node vector
                 } else {
                     std::lock_guard<std::mutex> lock(store_mutex);
-                    vc.elements = { n }; // n is your Node
-
                     key_value_store[key] = { n };
                 }
                 send(client_fd, "+OK\r\n", 5, 0);
