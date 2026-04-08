@@ -411,65 +411,62 @@ void handle_client(int client_fd) {
               }
           }
 
-        else if (command == "BLPOP" && request.elements.size() >= 3) {
-            std::string key = request.elements[1].bulkString;
+          else if (command == "BLPOP" && request.elements.size() >= 3) {
+              std::string key = request.elements[1].bulkString;
+              double timeout_sec = std::stod(request.elements.back().bulkString);
 
-            double timeout_sec = std::stod(request.elements.back().bulkString);
+              std::unique_lock<std::mutex> lock(store_mutex);
 
-            std::unique_lock<std::mutex> lock(store_mutex);
-            // 1. Check if the list already has items
-            auto check_list = [&]() {
-                return key_value_store.count(key) && !key_value_store[key].empty();
-            };
+              // Helper to check if key exists AND is a non-empty List
+              auto check_list = [&]() {
+                  if (key_value_store.find(key) == key_value_store.end()) return false;
+                  Node &n = key_value_store[key];
+                  if (n.type != KeyType::List) return false;
+                  return !std::get<std::vector<std::string>>(n.value).empty();
+              };
 
-            // 2. If empty, wait for notification or timeout
-            bool data_available = true;
-            if (!check_list()) {
-                if (timeout_sec == 0) {
-                    expiry_cv.wait(lock, check_list); // Wait forever
-                } else {
-                    auto timeout_duration = std::chrono::duration<double>(timeout_sec);
-                    data_available = expiry_cv.wait_for(lock, timeout_duration, check_list);
-                }
-            }
+              // Type Check early if key exists
+              if (key_value_store.count(key) && key_value_store[key].type != KeyType::List) {
+                  send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
+              } else {
+                  bool data_available = true;
+                  if (!check_list()) {
+                      if (timeout_sec == 0) {
+                          expiry_cv.wait(lock, check_list);
+                      } else {
+                          data_available = expiry_cv.wait_for(lock, std::chrono::duration<double>(timeout_sec), check_list);
+                      }
+                  }
 
-            if (data_available && check_list()) {
-                auto& list = key_value_store[key];
-                std::string val = list.front().value;
-                list.erase(list.begin()); // Pop the left-most element
+                  if (data_available && check_list()) {
+                      auto& list = std::get<std::vector<std::string>>(key_value_store[key].value);
+                      std::string val = list.front();
+                      list.erase(list.begin());
+                      if (list.empty()) key_value_store.erase(key);
 
-                // BLPOP returns an array: [key, value]
-                std::string resp = "*2\r\n";
-                resp += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
-                resp += "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                send(client_fd, resp.c_str(), resp.length(), 0);
-            } else {
-                // Timeout reached - return Null Array
-                send(client_fd, "*-1\r\n", 5, 0);
-            }
-        }
+                      std::string resp = "*2\r\n";
+                      resp += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
+                      resp += "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+                      send(client_fd, resp.c_str(), resp.length(), 0);
+                  } else {
+                      send(client_fd, "*-1\r\n", 5, 0);
+                  }
+              }
+          }
 
-        else if (command == "TYPE" && request.elements.size() >= 2) {
+      else if (command == "TYPE" && request.elements.size() >= 2) {
           std::string key = request.elements[1].bulkString;
           std::string result = "none";
 
           std::lock_guard<std::mutex> lock(store_mutex);
-          if (key_value_store.count(key)) {
-              auto& vec = key_value_store[key];
-              
-              // Check for lazy expiration
-              if (!vec.empty() && vec[0].hasTTL && std::chrono::steady_clock::now() >= vec[0].expires_at) {
-                  key_value_store.erase(key);
-              } else if (!vec.empty()) {
-                  switch (vec[0].type) {
-                      case KeyType::String:    result = "string";    break;
-                      case KeyType::List:      result = "list";      break;
-                      case KeyType::Set:       result = "set";       break;
-                      case KeyType::Hash:      result = "hash";      break;
-                      case KeyType::VectorSet: result = "vectorset"; break;
-                      // ... handle others ...
-                      default:                 result = "none";      break;
-                  }
+          auto it = key_value_store.find(key);
+          if (it != key_value_store.end()) {
+              Node &node = it->second;
+              // Lazy Expiration check
+              if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
+                  key_value_store.erase(it);
+              } else {
+                  result = typeToString(node.type);
               }
           }
 
@@ -478,38 +475,47 @@ void handle_client(int client_fd) {
       }
 
       else if (command == "XADD" && request.elements.size() >= 4) {
-        std::string key = request.elements[1].bulkString;
-        std::string id = request.elements[2].bulkString;
+          std::string key = request.elements[1].bulkString;
+          std::string id_req = request.elements[2].bulkString;
 
-        std::lock_guard<std::mutex> lock(store_mutex);
-        auto& node = key_value_store[key];
+          std::lock_guard<std::mutex> lock(store_mutex);
+          Node &node = key_value_store[key];
 
-        if (node.type == KeyType::None) {
-            node.type = KeyType::Stream;
-            node.value = std::vector<StreamEntry>{};
-        } else if (node.type != KeyType::Stream) {
-            send(client_fd, "-WRONGTYPE ...\r\n", 68, 0);
-            return;
-        }
+          if (node.type == KeyType::None) {
+              node.type = KeyType::Stream;
+              node.value = std::vector<StreamEntry>{};
+          } else if (node.type != KeyType::Stream) {
+              send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
+              return;
+          }
 
-        auto& stream = std::get<std::vector<StreamEntry>>(node.value);
-        
-        // Simple Monotonicity Check
-        if (!stream.empty() && id <= stream.back().id && id != "*") {
-            send(client_fd, "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n", 82, 0);
-            return;
-        }
+          auto& stream = std::get<std::vector<StreamEntry>>(node.value);
+          
+          // Generate ID if '*'
+          std::string final_id = id_req;
+          if (id_req == "*") {
+              auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::system_clock::now().time_since_epoch()).count();
+              final_id = std::to_string(now) + "-0";
+          }
 
-        StreamEntry entry;
-        entry.id = (id == "*") ? std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-0" : id;
-        for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
-            entry.fields[request.elements[i].bulkString] = request.elements[i+1].bulkString;
-        }
-        stream.push_back(entry);
+          // Monotonicity check
+          if (!stream.empty() && final_id <= stream.back().id) {
+              send(client_fd, "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n", 82, 0);
+              return;
+          }
 
-        std::string resp = "$" + std::to_string(entry.id.length()) + "\r\n" + entry.id + "\r\n";
-        send(client_fd, resp.c_str(), resp.length(), 0);
-    }
+          StreamEntry entry;
+          entry.id = final_id;
+          for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
+              entry.fields[request.elements[i].bulkString] = request.elements[i+1].bulkString;
+          }
+          stream.push_back(entry);
+
+          std::string resp = "$" + std::to_string(final_id.length()) + "\r\n" + final_id + "\r\n";
+          send(client_fd, resp.c_str(), resp.length(), 0);
+          expiry_cv.notify_all(); // Notify any XREAD waiters
+      }
 
       }
     }
