@@ -227,7 +227,7 @@ void handle_client(int client_fd) {
 
                 for (size_t i = 2; i < request.elements.size(); ++i) {
                     Node n;
-                    n.data = request.elements[i].bulkString;
+                    n.value = request.elements[i].bulkString;
                     n.type = KeyType::List; // Mark as list
                     vec.push_back(n);
                 }
