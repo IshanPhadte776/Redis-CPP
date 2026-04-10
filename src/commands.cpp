@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include "commands.h"
 #include "respparser.h" // Wherever your RespValue struct is
+#include "dataStructures.h" // Wherever your Node struct and key_value_store are
 
 // Link to the globals in main.cpp
 extern std::unordered_map<std::string, Node> key_value_store;
