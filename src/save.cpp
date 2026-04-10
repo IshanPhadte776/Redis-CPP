@@ -657,71 +657,168 @@
 //         }
 //     }
 // }
-
-//   else if (command == "XREAD" && request.elements.size() >= 4) {
-//     // 1. Find the "STREAMS" keyword and calculate how many keys we have
+// else if (command == "XREAD") {
+//     std::cout << "[DEBUG] Entering XREAD" << std::endl;
+//     long long block_ms = -1; 
 //     int streams_keyword_pos = -1;
+
+//     // 1. Parse Arguments
 //     for (size_t i = 1; i < request.elements.size(); ++i) {
 //         std::string arg = request.elements[i].bulkString;
 //         std::transform(arg.begin(), arg.end(), arg.begin(), ::toupper);
-//         if (arg == "STREAMS") {
-//             streams_keyword_pos = i;
-//             break;
+//         if (arg == "BLOCK" && i + 1 < request.elements.size()) {
+//             block_ms = std::stoll(request.elements[i + 1].bulkString);
 //         }
+//         if (arg == "STREAMS") streams_keyword_pos = i;
 //     }
 
-//     // Number of keys = (Total elements - (position of STREAMS + 1)) / 2
+//     if (streams_keyword_pos == -1) return; // Should not happen with valid RESP
+
 //     int num_keys = (request.elements.size() - (streams_keyword_pos + 1)) / 2;
 //     std::vector<std::string> keys;
-//     std::vector<StreamID> start_ids;
-
+//     std::vector<std::string> raw_ids;
 //     for (int i = 0; i < num_keys; ++i) {
 //         keys.push_back(request.elements[streams_keyword_pos + 1 + i].bulkString);
-//         start_ids.push_back(StreamID::parseRange(request.elements[streams_keyword_pos + 1 + num_keys + i].bulkString, false));
+//         raw_ids.push_back(request.elements[streams_keyword_pos + 1 + num_keys + i].bulkString);
 //     }
 
-//     std::lock_guard<std::mutex> lock(store_mutex);
-    
-//     // START RESP: Level 1 - Array of Streams
-//     std::string final_resp = "*" + std::to_string(num_keys) + "\r\n";
+//     std::unique_lock<std::mutex> lock(store_mutex);
 
+//     // 2. Resolve IDs (Handle "$")
+//     std::vector<StreamID> start_ids;
 //     for (int i = 0; i < num_keys; ++i) {
-//         std::string key = keys[i];
-//         StreamID last_id = start_ids[i];
-
-//         // Level 2 - The Stream [Key, Entries]
-//         final_resp += "*2\r\n";
-//         final_resp += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
-
-//         auto it = key_value_store.find(key);
-//         if (it == key_value_store.end() || it->second.type != KeyType::Stream) {
-//             final_resp += "*0\r\n"; // No entries found
+//         if (raw_ids[i] == "$") {
+//             if (key_value_store.count(keys[i]) && key_value_store[keys[i]].type == KeyType::Stream) {
+//                 auto& stream = std::get<std::vector<StreamEntry>>(key_value_store[keys[i]].value);
+//                 start_ids.push_back(stream.empty() ? StreamID{0, 0} : stream.back().id);
+//             } else {
+//                 start_ids.push_back(StreamID{0, 0});
+//             }
 //         } else {
-//             auto& stream = std::get<std::vector<StreamEntry>>(it->second.value);
+//             start_ids.push_back(StreamID::parseRange(raw_ids[i], false));
+//         }
+//         std::cout << "[DEBUG] XREAD Key: " << keys[i] << " Start ID: " << start_ids[i].toString() << std::endl;
+//     }
+
+//     // 3. The Predicate: Do any of our keys have data > start_id?
+//     auto has_new_data = [&]() {
+//         for (int i = 0; i < num_keys; ++i) {
+//             if (key_value_store.count(keys[i]) && key_value_store[keys[i]].type == KeyType::Stream) {
+//                 auto& stream = std::get<std::vector<StreamEntry>>(key_value_store[keys[i]].value);
+//                 if (!stream.empty() && stream.back().id > start_ids[i]) return true;
+//             }
+//         }
+//         return false;
+//     };
+
+//     // 4. Blocking logic
+//     if (block_ms >= 0 && !has_new_data()) {
+//         std::cout << "[DEBUG] No data yet, blocking for " << block_ms << "ms" << std::endl;
+//         if (block_ms == 0) {
+//             expiry_cv.wait(lock, has_new_data);
+//         } else {
+//             expiry_cv.wait_for(lock, std::chrono::milliseconds(block_ms), has_new_data);
+//         }
+//         std::cout << "[DEBUG] Woke up from block!" << std::endl;
+//     }
+
+//     // 5. Final check and Response Generation
+//     if (!has_new_data()) {
+//         std::cout << "[DEBUG] Timeout reached, sending NULL" << std::endl;
+//         send(client_fd, "*-1\r\n", 5, 0); // Null Array is the correct type for XREAD
+//     } else {
+//         std::cout << "[DEBUG] Data found! Building response array" << std::endl;
+//         // Count how many streams actually have new data
+//         std::vector<int> active_stream_indices;
+//         for (int i = 0; i < num_keys; ++i) {
+//             if (key_value_store.count(keys[i])) {
+//                 auto& stream = std::get<std::vector<StreamEntry>>(key_value_store[keys[i]].value);
+//                 if (!stream.empty() && stream.back().id > start_ids[i]) {
+//                     active_stream_indices.push_back(i);
+//                 }
+//             }
+//         }
+
+//         std::string final_resp = "*" + std::to_string(active_stream_indices.size()) + "\r\n";
+//         for (int idx : active_stream_indices) {
+//             final_resp += "*2\r\n";
+//             final_resp += "$" + std::to_string(keys[idx].length()) + "\r\n" + keys[idx] + "\r\n";
             
-//             // XREAD is strictly exclusive (>). upper_bound finds first element > last_id
-//             auto start_it = std::upper_bound(stream.begin(), stream.end(), last_id, 
+//             auto& stream = std::get<std::vector<StreamEntry>>(key_value_store[keys[idx]].value);
+//             auto start_it = std::upper_bound(stream.begin(), stream.end(), start_ids[idx], 
 //                 [](const StreamID& id, const StreamEntry& e) { return id < e.id; });
 
 //             long long entry_count = std::distance(start_it, stream.end());
 //             final_resp += "*" + std::to_string(entry_count) + "\r\n";
 
-//             for (auto entry_it = start_it; entry_it != stream.end(); ++entry_it) {
-//                 // Level 3 - The Entry [ID, Fields]
+//             for (auto it = start_it; it != stream.end(); ++it) {
 //                 final_resp += "*2\r\n";
-//                 std::string id_str = entry_it->id.toString();
+//                 std::string id_str = it->id.toString();
 //                 final_resp += "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
-
-//                 // Level 4 - The Data [f1, v1, f2, v2...]
-//                 final_resp += "*" + std::to_string(entry_it->fields.size() * 2) + "\r\n";
-//                 for (auto& pair : entry_it->fields) {
-//                     final_resp += "$" + std::to_string(pair.first.length()) + "\r\n" + pair.first + "\r\n";
-//                     final_resp += "$" + std::to_string(pair.second.length()) + "\r\n" + pair.second + "\r\n";
+//                 final_resp += "*" + std::to_string(it->fields.size() * 2) + "\r\n";
+//                 for (auto& p : it->fields) {
+//                     final_resp += "$" + std::to_string(p.first.length()) + "\r\n" + p.first + "\r\n";
+//                     final_resp += "$" + std::to_string(p.second.length()) + "\r\n" + p.second + "\r\n";
 //                 }
 //             }
 //         }
+//         send(client_fd, final_resp.c_str(), final_resp.length(), 0);
 //     }
-//     send(client_fd, final_resp.c_str(), final_resp.length(), 0);
+// }
+
+// else if (command == "INCR" && request.elements.size() >= 2) {
+//     std::string key = request.elements[1].bulkString;
+
+//     std::lock_guard<std::mutex> lock(store_mutex);
+    
+//     // 1. Check if key exists
+//     if (key_value_store.find(key) == key_value_store.end()) {
+//         // Case: Key doesn't exist. Create it with "1"
+//         Node n;
+//         n.type = KeyType::String;
+//         n.value = "1"; 
+//         n.hasTTL = false;
+//         key_value_store[key] = n;
+
+//         send(client_fd, ":1\r\n", 4, 0);
+//     } 
+//     else {
+//         Node &node = key_value_store[key];
+
+//         // 2. Type Check: Must be a String
+//         if (node.type != KeyType::String) {
+//             std::string err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+//             send(client_fd, err.c_str(), err.length(), 0);
+//         } 
+//         else {
+//             // 3. Extract string and attempt to parse as integer
+//             std::string& val_str = std::get<std::string>(node.value);
+            
+//             try {
+//                 size_t processed_char_count = 0;
+//                 long long current_val = std::stoll(val_str, &processed_char_count);
+
+//                 // Strict Check: stoll can parse "10hello" as 10. 
+//                 // Redis requires the WHOLE string to be the number.
+//                 if (processed_char_count != val_str.length()) {
+//                     throw std::invalid_argument("trailing characters");
+//                 }
+
+//                 // 4. Increment and update
+//                 current_val++;
+//                 node.value = std::to_string(current_val);
+
+//                 // 5. Respond with Integer RESP (starts with ':')
+//                 std::string resp = ":" + std::to_string(current_val) + "\r\n";
+//                 send(client_fd, resp.c_str(), resp.length(), 0);
+
+//             } catch (...) {
+//                 // Catches stoll failures (non-numeric strings) and overflows
+//                 std::string err = "-ERR value is not an integer or out of range\r\n";
+//                 send(client_fd, err.c_str(), err.length(), 0);
+//             }
+//         }
+//     }
 // }
 
 //       }
