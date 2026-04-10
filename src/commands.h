@@ -32,4 +32,8 @@ void handle_xread(int fd, const RespValue& req);
 // Generic Commands
 void handle_type(int fd, const RespValue& req);
 
+void execute_command(int client_fd, const RespValue& request);
+
+
+
 #endif // COMMANDS_H
