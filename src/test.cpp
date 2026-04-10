@@ -38,7 +38,7 @@ void log_test(const std::string& name, bool passed) {
     std::cout << (passed ? " [PASS] " : " [FAIL] ") << name << std::endl;
 }
 
-int main() {
+int test() {
     RedisClient client;
 
     std::cout << "--- Starting Redis Clone Test Suite ---\n";
