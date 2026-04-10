@@ -62,6 +62,13 @@ void background_cleanup() {
     }
 }
 
+// This map is your "Directory"
+std::unordered_map<std::string, std::function<void(int, const RespValue&)>> handlers = {
+    {"SET", handle_set},   // "SET" maps to the handle_set function
+    {"GET", handle_get},   // "GET" maps to the handle_get function
+    {"PING", handle_ping}  // "PING" maps to the handle_ping function
+};
+
 void execute_command(int client_fd, const RespValue& request) {
     if (request.elements.empty()) return;
 
