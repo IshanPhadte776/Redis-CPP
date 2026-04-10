@@ -222,8 +222,13 @@ void handle_client(int client_fd) {
         ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
         if (bytes_received <= 0) break;
 
+
         std::string raw_data(buffer, bytes_received);
         RespValue request = RespParser::parse(raw_data);
+
+
+        std::cout << "[DEBUG] Received raw data: " << raw_data << std::endl;
+        std::cout << "[DEBUG] Parsed command: " << (request.elements.empty() ? "None" : request.elements[0].bulkString) << std::endl;
 
         if (request.type == RespType::Array && !request.elements.empty()) {
             std::string command = request.elements[0].bulkString;
@@ -237,6 +242,21 @@ void handle_client(int client_fd) {
                 std::string resp = "$" + std::to_string(msg.length()) + "\r\n" + msg + "\r\n";
                 send(client_fd, resp.c_str(), resp.length(), 0);
             } 
+
+            else if (command == "FLUSHALL") {
+
+                std::lock_guard<std::mutex> lock(store_mutex);
+                
+                // 1. Clear the main data store
+                key_value_store.clear();
+                
+                // 2. Clear the expiry heap (priority_queue doesn't have .clear())
+                while (!expiry_heap.empty()) {
+                    expiry_heap.pop();
+                }
+                
+                send(client_fd, "+OK\r\n", 5, 0);
+            }
             else if (command == "SET" && request.elements.size() >= 3) {
                 std::string key = request.elements[1].bulkString;
                 std::string val = request.elements[2].bulkString;
@@ -521,7 +541,6 @@ void handle_client(int client_fd) {
       }
 
       else if (command == "XADD" && request.elements.size() >= 3) {
-        std::cout << "[DEBUG] Entering XADD" << std::endl;
         std::string key = request.elements[1].bulkString;
         std::string id_req = request.elements[2].bulkString;
         std::cout << "[DEBUG] Key: " << key << " ID_Req: " << id_req << std::endl;
