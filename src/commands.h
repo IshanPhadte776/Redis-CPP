@@ -1,35 +1,35 @@
-// #pragma once
-// #define COMMANDS_H
-// #ifndef COMMANDS_H
-// #include "respparser.h"
+#pragma once
+#define COMMANDS_H
+#ifndef COMMANDS_H
+#include "respparser.h"
 
-// #include <functional>
-// #include <unordered_map>
+#include <functional>
+#include <unordered_map>
 
-// // Core Commands
-// void handle_ping(int fd, const RespValue& req);
-// void handle_echo(int fd, const RespValue& req);
-// void handle_flushall(int fd, const RespValue& req);
+// Core Commands
+void handle_ping(int fd, const RespValue& req);
+void handle_echo(int fd, const RespValue& req);
+void handle_flushall(int fd, const RespValue& req);
 
-// // String Commands
-// void handle_set(int fd, const RespValue& req);
-// void handle_get(int fd, const RespValue& req);
-// void handle_incr(int fd, const RespValue& req);
+// String Commands
+void handle_set(int fd, const RespValue& req);
+void handle_get(int fd, const RespValue& req);
+void handle_incr(int fd, const RespValue& req);
 
-// // List Commands
-// void handle_rpush(int fd, const RespValue& req);
-// void handle_lpush(int fd, const RespValue& req);
-// void handle_lrange(int fd, const RespValue& req);
-// void handle_llen(int fd, const RespValue& req);
-// void handle_lpop(int fd, const RespValue& req);
-// void handle_blpop(int fd, const RespValue& req);
+// List Commands
+void handle_rpush(int fd, const RespValue& req);
+void handle_lpush(int fd, const RespValue& req);
+void handle_lrange(int fd, const RespValue& req);
+void handle_llen(int fd, const RespValue& req);
+void handle_lpop(int fd, const RespValue& req);
+void handle_blpop(int fd, const RespValue& req);
 
-// // Stream Commands
-// void handle_xadd(int fd, const RespValue& req);
-// void handle_xrange(int fd, const RespValue& req);
-// void handle_xread(int fd, const RespValue& req);
+// Stream Commands
+void handle_xadd(int fd, const RespValue& req);
+void handle_xrange(int fd, const RespValue& req);
+void handle_xread(int fd, const RespValue& req);
 
-// // Generic Commands
-// void handle_type(int fd, const RespValue& req);
+// Generic Commands
+void handle_type(int fd, const RespValue& req);
 
-// #endif // COMMANDS_H
+#endif // COMMANDS_H

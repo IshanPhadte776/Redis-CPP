@@ -15,8 +15,6 @@
 #include "respparser.h"
 #include "dataStructures.h"
 #include "commands.h"
-#include "commands.cpp"
-
 
 #include <condition_variable>
 
