@@ -1,6 +1,10 @@
 #ifndef DATA_STRUCTURES_H
 #define DATA_STRUCTURES_H
 
+#include <string>
+#include <vector>
+#include <variant>  // <--- ADD THIS: Required for std::variant
+#include <chrono>
 // ==========================================
 // 2. Data Structures & Global Store
 // ==========================================
