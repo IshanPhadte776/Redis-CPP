@@ -14,7 +14,9 @@
 #include <arpa/inet.h>
 #include "respparser.h"
 #include "dataStructures.h"
-#include "threadManagement.cpp"
+#include "commands.h"
+#include "commands.cpp"
+
 
 #include <condition_variable>
 
@@ -62,28 +64,6 @@ void background_cleanup() {
     }
 }
 
-// This map is your "Directory"
-std::unordered_map<std::string, std::function<void(int, const RespValue&)>> handlers = {
-    {"SET", handle_set},   // "SET" maps to the handle_set function
-    {"GET", handle_get},   // "GET" maps to the handle_get function
-    {"PING", handle_ping}  // "PING" maps to the handle_ping function
-};
-
-void execute_command(int client_fd, const RespValue& request) {
-    if (request.elements.empty()) return;
-
-    std::string cmd_name = request.elements[0].bulkString;
-    std::transform(cmd_name.begin(), cmd_name.end(), cmd_name.begin(), ::toupper);
-
-    auto it = handlers.find(cmd_name);
-    if (it != handlers.end()) {
-        it->second(client_fd, request);
-    } else {
-        std::string err = "-ERR unknown command '" + cmd_name + "'\r\n";
-        send(client_fd, err.c_str(), err.length(), 0);
-    }
-}
-
 // ==========================================
 // 4. Client Handler
 // ==========================================
@@ -108,246 +88,39 @@ void handle_client(int client_fd) {
             for (auto &c : command) c = toupper(c);
 
             if (command == "PING") {
-                send(client_fd, "+PONG\r\n", 7, 0);
+                execute_command(client_fd, request);
             } 
             else if (command == "ECHO" && request.elements.size() > 1) {
-                std::string msg = request.elements[1].bulkString;
-                std::string resp = "$" + std::to_string(msg.length()) + "\r\n" + msg + "\r\n";
-                send(client_fd, resp.c_str(), resp.length(), 0);
+                execute_command(client_fd, request);
             } 
 
             else if (command == "FLUSHALL") {
-
-                std::lock_guard<std::mutex> lock(store_mutex);
-                
-                // 1. Clear the main data store
-                key_value_store.clear();
-                
-                // 2. Clear the expiry heap (priority_queue doesn't have .clear())
-                while (!expiry_heap.empty()) {
-                    expiry_heap.pop();
-                }
-                
-                send(client_fd, "+OK\r\n", 5, 0);
+                execute_command(client_fd, request);
             }
             else if (command == "SET" && request.elements.size() >= 3) {
-                std::string key = request.elements[1].bulkString;
-                std::string val = request.elements[2].bulkString;
-
-                Node n;
-                n.value = val;           // Variant automatically becomes std::string
-                n.type = KeyType::String;
-                n.hasTTL = false;
-
-                // Handle EX (seconds) and PX (milliseconds)
-                if (request.elements.size() >= 5) {
-                    std::string flag = request.elements[3].bulkString;
-                    for (auto &c : flag) c = toupper(c);
-
-                    try {
-                        long long ms = std::stoll(request.elements[4].bulkString);
-                        if (flag == "EX") ms *= 1000;
-
-                        n.hasTTL = true;
-                        n.expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-                    } catch (...) {
-                        send(client_fd, "-ERR value is not an integer or out of range\r\n", 46, 0);
-                        continue;
-                    }
-                }
-
-                {
-                    std::lock_guard<std::mutex> lock(store_mutex);
-                    // Overwrite whatever was there (String, List, or Stream)
-                    key_value_store[key] = n; 
-                    
-                    if (n.hasTTL) {
-                        expiry_heap.push({key, n.expires_at});
-                    }
-                }
-                send(client_fd, "+OK\r\n", 5, 0);
+                execute_command(client_fd, request);
             }
             else if (command == "GET" && request.elements.size() >= 2) {
-                std::string key = request.elements[1].bulkString;
-                std::lock_guard<std::mutex> lock(store_mutex);
-
-                // 1. Check if key exists
-                if (key_value_store.find(key) == key_value_store.end()) {
-                    send(client_fd, "$-1\r\n", 5, 0);
-                } 
-                else {
-                    Node &node = key_value_store[key];
-
-                    // 2. Lazy Expiration Check
-                    if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
-                        key_value_store.erase(key);
-                        send(client_fd, "$-1\r\n", 5, 0);
-                    } 
-                    // 3. Type Safety Check (SWE 3 Requirement)
-                    else if (node.type != KeyType::String) {
-                        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
-                        send(client_fd, err, strlen(err), 0);
-                    } 
-                    // 4. Extract and Send
-                    else {
-                        // Use std::get to pull the string out of the variant
-                        std::string& result = std::get<std::string>(node.value);
-                        std::string resp = "$" + std::to_string(result.length()) + "\r\n" + result + "\r\n";
-                        send(client_fd, resp.c_str(), resp.length(), 0);
-                    }
-                }
+                execute_command(client_fd, request);
             }
             else if (command == "RPUSH" && request.elements.size() >= 3) {
-                std::string key = request.elements[1].bulkString;
-                std::lock_guard<std::mutex> lock(store_mutex);
-                Node &node = key_value_store[key];
-
-                // 1. Initialize if new key
-                if (node.type == KeyType::None) {
-                    node.type = KeyType::List;
-                    node.value = std::vector<std::string>{};
-                }
-
-                // 2. Type Check
-                if (node.type != KeyType::List) {
-                    send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
-                    return;
-                }
-
-                // 3. Extract the vector from the variant and push
-                auto& list = std::get<std::vector<std::string>>(node.value);
-                for (size_t i = 2; i < request.elements.size(); ++i) {
-                    list.push_back(request.elements[i].bulkString);
-                }
-
-                // 4. Return size
-                std::string resp = ":" + std::to_string(list.size()) + "\r\n";
-                send(client_fd, resp.c_str(), resp.length(), 0);
-
-                // 5. Signal blocked BLPOP threads
-                expiry_cv.notify_all();
+                execute_command(client_fd, request);
             }
 
             else if (command == "LPUSH" && request.elements.size() >= 3) {
-              std::string key = request.elements[1].bulkString;
-              std::lock_guard<std::mutex> lock(store_mutex);
-              
-              Node &node = key_value_store[key];
-
-              if (node.type == KeyType::None) {
-                  node.type = KeyType::List;
-                  node.value = std::vector<std::string>{};
-              }
-
-              if (node.type != KeyType::List) {
-                  send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
-                  return;
-              }
-
-              auto& list = std::get<std::vector<std::string>>(node.value);
-              for (size_t i = 2; i < request.elements.size(); ++i) {
-                  // Standard Redis LPUSH behavior: 
-                  // LPUSH key a b c -> List becomes [c, b, a]
-                  list.insert(list.begin(), request.elements[i].bulkString);
-              }
-
-              std::string resp = ":" + std::to_string(list.size()) + "\r\n";
-              send(client_fd, resp.c_str(), resp.length(), 0);
-
-              expiry_cv.notify_all();
+              execute_command(client_fd, request);
           }
 
           else if (command == "LRANGE" && request.elements.size() >= 4) {
-            std::string key = request.elements[1].bulkString;
-            long long start = std::stoll(request.elements[2].bulkString);
-            long long stop = std::stoll(request.elements[3].bulkString);
-
-            std::lock_guard<std::mutex> lock(store_mutex);
-
-            auto it = key_value_store.find(key);
-            if (it == key_value_store.end() || it->second.type != KeyType::List) {
-                // Redis returns an empty array if key doesn't exist or is the wrong type
-                send(client_fd, "*0\r\n", 4, 0);
-            } else {
-                auto& node = it->second;
-                auto& list = std::get<std::vector<std::string>>(node.value);
-                long long size = static_cast<long long>(list.size());
-
-                if (start < 0) start = size + start;
-                if (stop < 0) stop = size + stop;
-                if (start < 0) start = 0;
-                if (stop >= size) stop = size - 1;
-
-                if (start >= size || start > stop) {
-                    send(client_fd, "*0\r\n", 4, 0);
-                } else {
-                    long long count = stop - start + 1;
-                    std::string header = "*" + std::to_string(count) + "\r\n";
-                    send(client_fd, header.c_str(), header.length(), 0);
-
-                    for (long long i = start; i <= stop; ++i) {
-                        std::string& val = list[i];
-                        std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                        send(client_fd, resp.c_str(), resp.length(), 0);
-                    }
-                }
-            }
+                execute_command(client_fd, request);
         }
 
           else if (command == "LLEN" && request.elements.size() >= 2) {
-              std::string key = request.elements[1].bulkString;
-              std::lock_guard<std::mutex> lock(store_mutex);
-              
-              long long len = 0;
-              auto it = key_value_store.find(key);
-              if (it != key_value_store.end() && it->second.type == KeyType::List) {
-                  len = std::get<std::vector<std::string>>(it->second.value).size();
-              }
-              
-              std::string resp = ":" + std::to_string(len) + "\r\n";
-              send(client_fd, resp.c_str(), resp.length(), 0);
+              execute_command(client_fd, request);
           }
 
           else if (command == "LPOP" && request.elements.size() >= 2) {
-              std::string key = request.elements[1].bulkString;
-              bool has_count = (request.elements.size() >= 3);
-              int count = has_count ? std::stoi(request.elements[2].bulkString) : 1;
-
-              std::lock_guard<std::mutex> lock(store_mutex);
-
-              auto it = key_value_store.find(key);
-              if (it == key_value_store.end()) {
-                  send(client_fd, "$-1\r\n", 5, 0);
-              } else if (it->second.type != KeyType::List) {
-                  send(client_fd, "-WRONGTYPE ...\r\n", 16, 0); // Simplified for brevity
-              } else {
-                  auto& list = std::get<std::vector<std::string>>(it->second.value);
-                  
-                  if (has_count && count <= 0) {
-                      send(client_fd, "*0\r\n", 4, 0);
-                  } else if (!has_count) {
-                      // Single Pop
-                      std::string val = list.front();
-                      list.erase(list.begin());
-                      if (list.empty()) key_value_store.erase(it);
-
-                      std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                      send(client_fd, resp.c_str(), resp.length(), 0);
-                  } else {
-                      // Multi Pop
-                      int actual_to_pop = std::min((int)list.size(), count);
-                      std::string header = "*" + std::to_string(actual_to_pop) + "\r\n";
-                      send(client_fd, header.c_str(), header.length(), 0);
-
-                      for (int i = 0; i < actual_to_pop; ++i) {
-                          std::string val = list.front();
-                          list.erase(list.begin());
-                          std::string resp = "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                          send(client_fd, resp.c_str(), resp.length(), 0);
-                      }
-                      if (list.empty()) key_value_store.erase(it);
-                  }
-              }
+                execute_command(client_fd, request);
           }
 
           else if (command == "BLPOP" && request.elements.size() >= 3) {
