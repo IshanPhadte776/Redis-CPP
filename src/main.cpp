@@ -62,6 +62,8 @@ void background_cleanup() {
     }
 }
 
+void execute_command(int client_fd, const RespValue& request);
+
 // ==========================================
 // 4. Client Handler
 // ==========================================
