@@ -17,7 +17,7 @@
 // $13 = Bulk string of length 13 (favourite_food is a bulk string of length 13)
 // favourite_food = The actual key being sent by the client
 // \r\n = Carriage return and newline, used to indicate the end of a RESP message
-
+#pragma once
 #ifndef RESP_PARSER_H
 #define RESP_PARSER_H
 

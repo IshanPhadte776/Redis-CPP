@@ -1,3 +1,4 @@
+#pragma once
 #define COMMANDS_H
 #ifndef COMMANDS_H
 #include "respparser.h"
