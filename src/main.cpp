@@ -67,6 +67,8 @@ void background_cleanup() {
 // ==========================================
 void handle_client(int client_fd) {
     char buffer[1024];
+    bool in_transaction = false;
+    std::vector<RespValue> command_queue;
     while (true) {
         ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
         if (bytes_received <= 0) break;
@@ -686,6 +688,54 @@ else if (command == "INCR" && request.elements.size() >= 2) {
                 std::string err = "-ERR value is not an integer or out of range\r\n";
                 send(client_fd, err.c_str(), err.length(), 0);
             }
+        }
+    }
+}
+
+else if (command == "MULTI") {
+    std::cout << "[DEBUG] Received MULTI command" << std::endl;
+                if (in_transaction) {
+                    send(client_fd, "-ERR MULTI calls can not be nested\r\n", 37, 0);
+                } else {
+                    in_transaction = true;
+                    send(client_fd, "+OK\r\n", 5, 0);
+                    std::cout << "[DEBUG] Client entered transaction mode." << std::endl;
+                }
+                continue; 
+            }
+
+            // --- 2. DISCARD Command Logic ---
+            else if (command == "DISCARD") {
+                if (!in_transaction) {
+                    send(client_fd, "-ERR DISCARD without MULTI\r\n", 28, 0);
+                } else {
+                    in_transaction = false;
+                    command_queue.clear();
+                    send(client_fd, "+OK\r\n", 5, 0);
+                }
+                continue;
+            }
+
+else if (command == "EXEC") {
+    if (!in_transaction) {
+        send(client_fd, "-ERR EXEC without MULTI\r\n", 25, 0);
+    } else {
+        in_transaction = false; // Reset state immediately
+        
+        if (command_queue.empty()) {
+            send(client_fd, "*0\r\n", 4, 0);
+        } else {
+            // Start the response array
+            std::string multi_resp = "*" + std::to_string(command_queue.size()) + "\r\n";
+            send(client_fd, multi_resp.c_str(), multi_resp.length(), 0);
+
+            // Here is where the refactor pays off!
+            // You can call your execute_command helper for each one.
+            for (const auto& cmd : command_queue) {
+                // Pass the client_fd to your command dispatcher
+                execute_command(client_fd, cmd); 
+            }
+            command_queue.clear();
         }
     }
 }
