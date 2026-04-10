@@ -22,7 +22,7 @@ enum class KeyType {
 };
 
 // Map the enum to the string response required by Redis
-std::string typeToString(KeyType t) {
+inline std::string typeToString(KeyType t) {
     switch (t) {
         case KeyType::String:    return "string";
         case KeyType::List:      return "list";
