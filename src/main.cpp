@@ -62,6 +62,21 @@ void background_cleanup() {
     }
 }
 
+void execute_command(int client_fd, const RespValue& request) {
+    if (request.elements.empty()) return;
+
+    std::string cmd_name = request.elements[0].bulkString;
+    std::transform(cmd_name.begin(), cmd_name.end(), cmd_name.begin(), ::toupper);
+
+    auto it = handlers.find(cmd_name);
+    if (it != handlers.end()) {
+        it->second(client_fd, request);
+    } else {
+        std::string err = "-ERR unknown command '" + cmd_name + "'\r\n";
+        send(client_fd, err.c_str(), err.length(), 0);
+    }
+}
+
 // ==========================================
 // 4. Client Handler
 // ==========================================
@@ -744,6 +759,8 @@ else if (command == "EXEC") {
     }
     close(client_fd);
 }
+
+
 
 
 // ==========================================
