@@ -483,7 +483,9 @@ void handle_info(int fd, const RespValue& request) {
     std::string payload;
     if (want.empty() || want == "replication") {
         const char* role = server_is_replica ? "slave" : "master";
-        payload = std::string("# Replication\r\nrole:") + role + "\r\n";
+        payload = std::string("# Replication\r\nrole:") + role + "\r\n"
+            "master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
+            "master_repl_offset:0\r\n";
     }
 
     std::string out = "$" + std::to_string(payload.size()) + "\r\n" + payload + "\r\n";
