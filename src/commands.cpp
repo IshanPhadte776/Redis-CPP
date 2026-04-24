@@ -17,7 +17,7 @@
 
 // Link to the globals in main.cpp
 extern std::unordered_map<std::string, Node> key_value_store;
-extern std::recursive_mutex store_mutex;
+extern std::mutex store_mutex;
 extern std::unordered_map<std::string, std::uint64_t> key_versions;
 extern std::uint64_t global_flush_epoch;
 extern std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEntry>> expiry_heap;
@@ -50,7 +50,7 @@ void handle_echo(int fd, const RespValue& request) {
 }
 
 void handle_flushall(int fd, const RespValue& request) {
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     store_note_database_flush();
     key_value_store.clear();
     
@@ -96,7 +96,7 @@ void handle_set(int fd, const RespValue& request) {
     }
 
     {
-        std::lock_guard<std::recursive_mutex> lock(store_mutex);
+        std::lock_guard<std::mutex> lock(store_mutex);
         key_value_store[key] = n;
         store_bump_key_revision(key);
         if (n.hasTTL) {
@@ -113,7 +113,7 @@ void handle_get(int fd, const RespValue& request) {
         return;
     }
     std::string key = request.elements[1].bulkString;
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
 
     auto it = key_value_store.find(key);
     if (it == key_value_store.end()) {
@@ -148,7 +148,7 @@ void handle_incr(int fd, const RespValue& request) {
     std::string key = request.elements[1].bulkString;
 
     // 2. Lock the global store
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     
     // 3. Check if key exists
     auto it = key_value_store.find(key);
@@ -210,7 +210,7 @@ void handle_rpush(int fd, const RespValue& request) {
         return;
     }
     std::string key = request.elements[1].bulkString;
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     Node &node = key_value_store[key];
 
     if (node.type == KeyType::None) {
@@ -242,7 +242,7 @@ void handle_lpush(int fd, const RespValue& request) {
         return;
     }
     std::string key = request.elements[1].bulkString;
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     Node &node = key_value_store[key];
 
     if (node.type == KeyType::None) {
@@ -285,7 +285,7 @@ void handle_lrange(int fd, const RespValue& request) {
         return;
     }
 
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     auto it = key_value_store.find(key);
     if (it == key_value_store.end() || it->second.type != KeyType::List) {
         send(fd, "*0\r\n", 4, 0);
@@ -321,7 +321,7 @@ void handle_llen(int fd, const RespValue& request) {
         return;
     }
     std::string key = request.elements[1].bulkString;
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     
     long long len = 0;
     auto it = key_value_store.find(key);
@@ -352,7 +352,7 @@ void handle_lpop(int fd, const RespValue& request) {
         }
     }
 
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     auto it = key_value_store.find(key);
     
     if (it == key_value_store.end()) {
@@ -407,7 +407,7 @@ void handle_blpop(int fd, const RespValue& request) {
         return;
     }
 
-    std::unique_lock<std::recursive_mutex> lock(store_mutex);
+    std::unique_lock<std::mutex> lock(store_mutex);
 
     // Predicate: Is there a list and is it non-empty?
     auto check_list = [&]() {
@@ -457,7 +457,7 @@ void handle_type(int fd, const RespValue& request) {
     std::string key = request.elements[1].bulkString;
     std::string result = "none";
 
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     auto it = key_value_store.find(key);
     if (it != key_value_store.end()) {
         Node &node = it->second;
@@ -475,7 +475,7 @@ void handle_type(int fd, const RespValue& request) {
 void handle_watch(int fd, const RespValue& request,
                   std::unordered_map<std::string, std::uint64_t>& watch_versions,
                   std::uint64_t& watch_flush_epoch) {
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     if (request.elements.size() > 1) {
         watch_flush_epoch = global_flush_epoch;
     }
@@ -498,7 +498,7 @@ void handle_xadd(int fd, const RespValue& request) {
     std::string key = request.elements[1].bulkString;
     std::string id_req = request.elements[2].bulkString;
 
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     Node &node = key_value_store[key];
 
     if (node.type == KeyType::None) {
@@ -581,7 +581,7 @@ void handle_xrange(int fd, const RespValue& request) {
     StreamID start_id = StreamID::parseRange(request.elements[2].bulkString, true);
     StreamID end_id = StreamID::parseRange(request.elements[3].bulkString, false);
 
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     
     auto it = key_value_store.find(key);
     if (it == key_value_store.end() || it->second.type != KeyType::Stream) {
@@ -701,7 +701,7 @@ void execute_command_for_exec(int client_fd, const RespValue& request) {
 void execute_transaction_exec(int client_fd, std::vector<RespValue>& command_queue,
                                 std::unordered_map<std::string, std::uint64_t>& watch_versions,
                                 std::uint64_t& watch_flush_epoch) {
-    std::lock_guard<std::recursive_mutex> lock(store_mutex);
+    std::lock_guard<std::mutex> lock(store_mutex);
     const char* null_exec = "*-1\r\n";
 
     auto abort_exec = [&]() {
