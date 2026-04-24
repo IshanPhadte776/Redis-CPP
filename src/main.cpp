@@ -6,6 +6,7 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <queue>
 #include <chrono>
@@ -69,6 +70,7 @@ void handle_client(int client_fd) {
     char buffer[1024];
     bool in_transaction = false;
     std::vector<RespValue> command_queue;
+    std::unordered_set<std::string> watched_keys;
     while (true) {
         ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
         if (bytes_received <= 0) break;
@@ -91,14 +93,21 @@ void handle_client(int client_fd) {
                     send(client_fd, "-ERR MULTI calls can not be nested\r\n", 37, 0);
                     continue;
                 }
+                if (command == "WATCH") {
+                    const char* err = "-ERR WATCH inside MULTI is not allowed\r\n";
+                    send(client_fd, err, static_cast<int>(strlen(err)), 0);
+                    continue;
+                }
                 if (command == "DISCARD") {
                     in_transaction = false;
                     command_queue.clear();
+                    watched_keys.clear();
                     send(client_fd, "+OK\r\n", 5, 0);
                     continue;
                 }
                 if (command == "EXEC") {
                     in_transaction = false;
+                    watched_keys.clear();
                     if (command_queue.empty()) {
                         send(client_fd, "*0\r\n", 4, 0);
                     } else {
@@ -280,6 +289,10 @@ void handle_client(int client_fd) {
           else if (command == "INCR" && request.elements.size() >= 2) {
                 execute_command(client_fd, request);
           }
+
+          else if (command == "WATCH") {
+                handle_watch(client_fd, request, watched_keys);
+            }
 
           else if (command == "MULTI") {
                 std::cout << "[DEBUG] Received MULTI command" << std::endl;

@@ -6,6 +6,8 @@
 
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
+#include <string>
 
 // Core Commands
 void handle_ping(int fd, const RespValue& req);
@@ -32,6 +34,9 @@ void handle_xread(int fd, const RespValue& req);
 
 // Generic Commands
 void handle_type(int fd, const RespValue& req);
+
+// Transactions (optimistic locking): per-client watched keys live in main's handle_client.
+void handle_watch(int fd, const RespValue& req, std::unordered_set<std::string>& watched_keys);
 
 void execute_command(int client_fd, const RespValue& request);
 

@@ -1,6 +1,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <iostream>
 #include <algorithm>
@@ -451,6 +452,13 @@ void handle_type(int fd, const RespValue& request) {
     }
     std::string resp = "+" + result + "\r\n";
     send(fd, resp.c_str(), resp.length(), 0);
+}
+
+void handle_watch(int fd, const RespValue& request, std::unordered_set<std::string>& watched_keys) {
+    for (size_t i = 1; i < request.elements.size(); ++i) {
+        watched_keys.insert(request.elements[i].bulkString);
+    }
+    send(fd, "+OK\r\n", 5, 0);
 }
 
 void handle_xadd(int fd, const RespValue& request) {
