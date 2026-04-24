@@ -87,6 +87,37 @@ void handle_client(int client_fd) {
             std::string command = request.elements[0].bulkString;
             for (auto &c : command) c = toupper(c);
 
+            if (in_transaction) {
+                if (command == "MULTI") {
+                    std::cout << "[DEBUG] Received MULTI command (nested)" << std::endl;
+                    send(client_fd, "-ERR MULTI calls can not be nested\r\n", 37, 0);
+                    continue;
+                }
+                if (command == "DISCARD") {
+                    in_transaction = false;
+                    command_queue.clear();
+                    send(client_fd, "+OK\r\n", 5, 0);
+                    continue;
+                }
+                if (command == "EXEC") {
+                    in_transaction = false;
+                    if (command_queue.empty()) {
+                        send(client_fd, "*0\r\n", 4, 0);
+                    } else {
+                        std::string multi_resp = "*" + std::to_string(command_queue.size()) + "\r\n";
+                        send(client_fd, multi_resp.c_str(), multi_resp.length(), 0);
+                        for (const auto& cmd : command_queue) {
+                            execute_command(client_fd, cmd);
+                        }
+                        command_queue.clear();
+                    }
+                    continue;
+                }
+                command_queue.push_back(request);
+                send(client_fd, "+QUEUED\r\n", 9, 0);
+                continue;
+            }
+
             if (command == "PING") {
                 execute_command(client_fd, request);
             } 
@@ -254,50 +285,20 @@ void handle_client(int client_fd) {
 
           else if (command == "MULTI") {
                 std::cout << "[DEBUG] Received MULTI command" << std::endl;
-                if (in_transaction) {
-                    send(client_fd, "-ERR MULTI calls can not be nested\r\n", 37, 0);
-                } else {
-                    in_transaction = true;
-                    send(client_fd, "+OK\r\n", 5, 0);
-                    std::cout << "[DEBUG] Client entered transaction mode." << std::endl;
-                }
-                continue; 
+                in_transaction = true;
+                send(client_fd, "+OK\r\n", 5, 0);
+                std::cout << "[DEBUG] Client entered transaction mode." << std::endl;
+                continue;
             }
 
-            // --- 2. DISCARD Command Logic ---
           else if (command == "DISCARD") {
-                if (!in_transaction) {
-                    send(client_fd, "-ERR DISCARD without MULTI\r\n", 28, 0);
-                } else {
-                    in_transaction = false;
-                    command_queue.clear();
-                    send(client_fd, "+OK\r\n", 5, 0);
-                }
+                send(client_fd, "-ERR DISCARD without MULTI\r\n", 28, 0);
                 continue;
             }
 
           else if (command == "EXEC") {
-            if (!in_transaction) {
-                send(client_fd, "-ERR EXEC without MULTI\r\n", 25, 0);
-            } else {
-                in_transaction = false; // Reset state immediately
-                
-                if (command_queue.empty()) {
-                    send(client_fd, "*0\r\n", 4, 0);
-                } else {
-                    // Start the response array
-                    std::string multi_resp = "*" + std::to_string(command_queue.size()) + "\r\n";
-                    send(client_fd, multi_resp.c_str(), multi_resp.length(), 0);
-
-                    // Here is where the refactor pays off!
-                    // You can call your execute_command helper for each one.
-                    for (const auto& cmd : command_queue) {
-                        // Pass the client_fd to your command dispatcher
-                        execute_command(client_fd, cmd); 
-                    }
-                    command_queue.clear();
-                }
-            }
+            send(client_fd, "-ERR EXEC without MULTI\r\n", 25, 0);
+            continue;
         }
 
       }
