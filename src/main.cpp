@@ -28,6 +28,9 @@ std::mutex store_mutex;
 std::condition_variable expiry_cv;
 std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEntry>> expiry_heap;
 
+// Set by --replicaof; INFO replication reports role:slave when true.
+bool server_is_replica = false;
+
 // ==========================================
 // 3. Background Cleanup (Active Expiry)
 // ==========================================
@@ -347,6 +350,22 @@ int main(int argc, char* argv[]) {
             }
             port = static_cast<int>(parsed);
             ++i;
+        } else if (std::strcmp(argv[i], "--replicaof") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --replicaof requires host and port\n";
+                return 1;
+            }
+            server_is_replica = true;
+            std::string spec(argv[i + 1]);
+            if (spec.find(' ') != std::string::npos) {
+                ++i;
+            } else {
+                if (i + 2 >= argc) {
+                    std::cerr << "error: --replicaof requires host and port\n";
+                    return 1;
+                }
+                i += 2;
+            }
         }
     }
 

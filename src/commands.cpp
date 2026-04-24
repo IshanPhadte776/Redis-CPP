@@ -22,6 +22,7 @@ extern std::unordered_map<std::string, std::uint64_t> key_versions;
 extern std::uint64_t global_flush_epoch;
 extern std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEntry>> expiry_heap;
 extern std::condition_variable expiry_cv;
+extern bool server_is_replica;
 
 void store_bump_key_revision(const std::string& key) { key_versions[key]++; }
 
@@ -481,7 +482,8 @@ void handle_info(int fd, const RespValue& request) {
 
     std::string payload;
     if (want.empty() || want == "replication") {
-        payload = "# Replication\r\nrole:master\r\n";
+        const char* role = server_is_replica ? "slave" : "master";
+        payload = std::string("# Replication\r\nrole:") + role + "\r\n";
     }
 
     std::string out = "$" + std::to_string(payload.size()) + "\r\n" + payload + "\r\n";
