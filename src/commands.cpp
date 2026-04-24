@@ -334,6 +334,191 @@ void handle_lpop(int fd, const RespValue& request) {
     }
 }
 
+void handle_blpop(int fd, const RespValue& request) {
+    if (request.elements.size() < 3) return;
+    std::string key = request.elements[1].bulkString;
+    double timeout_sec = std::stod(request.elements.back().bulkString);
+
+    std::unique_lock<std::mutex> lock(store_mutex);
+
+    // Predicate: Is there a list and is it non-empty?
+    auto check_list = [&]() {
+        if (key_value_store.find(key) == key_value_store.end()) return false;
+        Node &n = key_value_store[key];
+        if (n.type != KeyType::List) return false;
+        return !std::get<std::vector<std::string>>(n.value).empty();
+    };
+
+    // Type Check
+    if (key_value_store.count(key) && key_value_store[key].type != KeyType::List) {
+        send(fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
+        return;
+    }
+
+    bool data_available = true;
+    if (!check_list()) {
+        if (timeout_sec == 0) {
+            expiry_cv.wait(lock, check_list);
+        } else {
+            data_available = expiry_cv.wait_for(lock, std::chrono::duration<double>(timeout_sec), check_list);
+        }
+    }
+
+    if (data_available && check_list()) {
+        auto& list = std::get<std::vector<std::string>>(key_value_store[key].value);
+        std::string val = list.front();
+        list.erase(list.begin());
+        if (list.empty()) key_value_store.erase(key);
+
+        std::string resp = "*2\r\n";
+        resp += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
+        resp += "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
+        send(fd, resp.c_str(), resp.length(), 0);
+    } else {
+        send(fd, "*-1\r\n", 5, 0); // Timeout case
+    }
+}
+
+void handle_type(int fd, const RespValue& request) {
+    if (request.elements.size() < 2) return;
+    std::string key = request.elements[1].bulkString;
+    std::string result = "none";
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+    auto it = key_value_store.find(key);
+    if (it != key_value_store.end()) {
+        Node &node = it->second;
+        if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
+            key_value_store.erase(it);
+        } else {
+            result = typeToString(node.type);
+        }
+    }
+    std::string resp = "+" + result + "\r\n";
+    send(fd, resp.c_str(), resp.length(), 0);
+}
+
+void handle_xadd(int fd, const RespValue& request) {
+    if (request.elements.size() < 3) return;
+    std::string key = request.elements[1].bulkString;
+    std::string id_req = request.elements[2].bulkString;
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+    Node &node = key_value_store[key];
+
+    if (node.type == KeyType::None) {
+        node.type = KeyType::Stream;
+        node.value = std::vector<StreamEntry>{};
+    } else if (node.type != KeyType::Stream) {
+        send(fd, "-WRONGTYPE ...\r\n", 16, 0);
+        return;
+    }
+
+    auto& stream = std::get<std::vector<StreamEntry>>(node.value);
+    StreamID last_id = stream.empty() ? StreamID{0, 0} : stream.back().id;
+    StreamID final_id;
+
+    try {
+        if (id_req == "*") {
+            long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            final_id.ms = std::max(now_ms, last_id.ms);
+            final_id.seq = (final_id.ms == last_id.ms) ? last_id.seq + 1 : 0;
+            if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
+        } else if (id_req.find("-*") != std::string::npos) {
+            long long req_ms = std::stoll(id_req.substr(0, id_req.find("-*")));
+            if (req_ms < last_id.ms) {
+                send(fd, "-ERR The ID specified in XADD is equal or smaller...\r\n", 54, 0);
+                return;
+            }
+            final_id.ms = req_ms;
+            final_id.seq = (req_ms == last_id.ms) ? last_id.seq + 1 : 0;
+            if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
+        } else {
+            final_id = StreamID::parse(id_req);
+            if ((final_id.ms == 0 && final_id.seq == 0) || (final_id <= last_id)) {
+                send(fd, "-ERR The ID specified in XADD is invalid or not monotonic\r\n", 58, 0);
+                return;
+            }
+        }
+    } catch (...) { return; }
+
+    StreamEntry entry;
+    entry.id = final_id;
+    for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
+        entry.fields.push_back({request.elements[i].bulkString, request.elements[i+1].bulkString});
+    }
+    stream.push_back(entry);
+
+    std::string id_str = final_id.toString();
+    std::string resp = "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+    send(fd, resp.c_str(), resp.length(), 0);
+    expiry_cv.notify_all();
+}
+
+void handle_xrange(int fd, const RespValue& request) {
+    // 1. Validation
+    if (request.elements.size() < 4) {
+        const char* err = "-ERR wrong number of arguments for 'xrange' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    std::string key = request.elements[1].bulkString;
+    
+    // 2. Parse range boundaries
+    StreamID start_id = StreamID::parseRange(request.elements[2].bulkString, true);
+    StreamID end_id = StreamID::parseRange(request.elements[3].bulkString, false);
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+    
+    auto it = key_value_store.find(key);
+    if (it == key_value_store.end() || it->second.type != KeyType::Stream) {
+        // Redis returns an empty array if key doesn't exist
+        send(fd, "*0\r\n", 4, 0);
+        return;
+    }
+
+    auto& stream = std::get<std::vector<StreamEntry>>(it->second.value);
+
+    // 3. Binary Search for the range
+    // First element >= start_id
+    auto start_it = std::lower_bound(stream.begin(), stream.end(), start_id, 
+        [](const StreamEntry& e, const StreamID& id) { return e.id < id; });
+
+    // First element > end_id
+    auto end_it = std::upper_bound(stream.begin(), stream.end(), end_id, 
+        [](const StreamID& id, const StreamEntry& e) { return id < e.id; });
+
+    // 4. Calculate count and send RESP Array Header
+    long long count = std::distance(start_it, end_it);
+    if (count < 0) count = 0;
+    
+    std::string header = "*" + std::to_string(count) + "\r\n";
+    send(fd, header.c_str(), header.length(), 0);
+
+    // 5. Serialize and Send Entries
+    for (auto entry_it = start_it; entry_it != end_it; ++entry_it) {
+        const auto& entry = *entry_it;
+        
+        // Each entry is [ID, [fields]]
+        std::string entry_resp = "*2\r\n";
+        
+        // Send ID
+        std::string id_str = entry.id.toString();
+        entry_resp += "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
+        
+        // Send Fields Array
+        entry_resp += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
+        for (const auto& pair : entry.fields) {
+            entry_resp += "$" + std::to_string(pair.first.length()) + "\r\n" + pair.first + "\r\n";
+            entry_resp += "$" + std::to_string(pair.second.length()) + "\r\n" + pair.second + "\r\n";
+        }
+        
+        send(fd, entry_resp.c_str(), entry_resp.length(), 0);
+    }
+}
+
 std::unordered_map<std::string, std::function<void(int, const RespValue&)>> handlers = {
     // Basic
     {"PING",     handle_ping},
@@ -350,16 +535,16 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"LPUSH",    handle_lpush},
     {"LRANGE",   handle_lrange},
     {"LLEN",     handle_llen},
-    {"LPOP",     handle_lpop}
-    // {"BLPOP",    handle_blpop},
+    {"LPOP",     handle_lpop},
+    {"BLPOP",    handle_blpop},
 
     // // Streams
-    // {"XADD",     handle_xadd},
-    // {"XRANGE",   handle_xrange},
+    {"XADD",     handle_xadd},
+    {"XRANGE",   handle_xrange},
     // {"XREAD",    handle_xread},
 
     // // Metadata
-    // {"TYPE",     handle_type}
+    {"TYPE",     handle_type}
 };
 
 
@@ -372,6 +557,9 @@ void execute_command(int client_fd, const RespValue& request) {
     auto it = handlers.find(cmd_name);
     if (it != handlers.end()) {
         it->second(client_fd, request);
+        if (cmd_name == "SET" || cmd_name == "RPUSH" || cmd_name == "LPUSH") {
+            expiry_cv.notify_all(); // Notify after modifying data that BLPOP/XREAD might be waiting on
+        }
     } else {
         std::string err = "-ERR unknown command '" + cmd_name + "'\r\n";
         send(client_fd, err.c_str(), err.length(), 0);

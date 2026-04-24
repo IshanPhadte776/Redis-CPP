@@ -124,206 +124,22 @@ void handle_client(int client_fd) {
           }
 
           else if (command == "BLPOP" && request.elements.size() >= 3) {
-              std::string key = request.elements[1].bulkString;
-              double timeout_sec = std::stod(request.elements.back().bulkString);
-
-              std::unique_lock<std::mutex> lock(store_mutex);
-
-              // Helper to check if key exists AND is a non-empty List
-              auto check_list = [&]() {
-                  if (key_value_store.find(key) == key_value_store.end()) return false;
-                  Node &n = key_value_store[key];
-                  if (n.type != KeyType::List) return false;
-                  return !std::get<std::vector<std::string>>(n.value).empty();
-              };
-
-              // Type Check early if key exists
-              if (key_value_store.count(key) && key_value_store[key].type != KeyType::List) {
-                  send(client_fd, "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", 68, 0);
-              } else {
-                  bool data_available = true;
-                  if (!check_list()) {
-                      if (timeout_sec == 0) {
-                          expiry_cv.wait(lock, check_list);
-                      } else {
-                          data_available = expiry_cv.wait_for(lock, std::chrono::duration<double>(timeout_sec), check_list);
-                      }
-                  }
-
-                  if (data_available && check_list()) {
-                      auto& list = std::get<std::vector<std::string>>(key_value_store[key].value);
-                      std::string val = list.front();
-                      list.erase(list.begin());
-                      if (list.empty()) key_value_store.erase(key);
-
-                      std::string resp = "*2\r\n";
-                      resp += "$" + std::to_string(key.length()) + "\r\n" + key + "\r\n";
-                      resp += "$" + std::to_string(val.length()) + "\r\n" + val + "\r\n";
-                      send(client_fd, resp.c_str(), resp.length(), 0);
-                  } else {
-                      send(client_fd, "*-1\r\n", 5, 0);
-                  }
-              }
+                execute_command(client_fd, request);
           }
 
-      else if (command == "TYPE" && request.elements.size() >= 2) {
-          std::string key = request.elements[1].bulkString;
-          std::string result = "none";
+          else if (command == "TYPE" && request.elements.size() >= 2) {
+                execute_command(client_fd, request);
+         }
 
-          std::lock_guard<std::mutex> lock(store_mutex);
-          auto it = key_value_store.find(key);
-          if (it != key_value_store.end()) {
-              Node &node = it->second;
-              // Lazy Expiration check
-              if (node.hasTTL && std::chrono::steady_clock::now() >= node.expires_at) {
-                  key_value_store.erase(it);
-              } else {
-                  result = typeToString(node.type);
-              }
+          else if (command == "XADD" && request.elements.size() >= 3) {
+                execute_command(client_fd, request);
           }
 
-          std::string resp = "+" + result + "\r\n";
-          send(client_fd, resp.c_str(), resp.length(), 0);
-      }
-
-      else if (command == "XADD" && request.elements.size() >= 3) {
-        std::string key = request.elements[1].bulkString;
-        std::string id_req = request.elements[2].bulkString;
-        std::cout << "[DEBUG] Key: " << key << " ID_Req: " << id_req << std::endl;
-
-        std::lock_guard<std::mutex> lock(store_mutex);
-        Node &node = key_value_store[key];
-
-        if (node.type == KeyType::None) {
-            std::cout << "[DEBUG] New stream detected" << std::endl;
-            node.type = KeyType::Stream;
-            node.value = std::vector<StreamEntry>{};
-        } else if (node.type != KeyType::Stream) {
-            std::cout << "[DEBUG] WRONGTYPE error" << std::endl;
-            std::string err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
-            send(client_fd, err.c_str(), err.length(), 0);
-            return;
-        }
-
-        auto& stream = std::get<std::vector<StreamEntry>>(node.value);
-        StreamID last_id = stream.empty() ? StreamID{0, 0} : stream.back().id;
-        StreamID final_id;
-        std::cout << "[DEBUG] Last ID in stream: " << last_id.toString() << std::endl;
-
-        try {
-            if (id_req == "*") {
-                std::cout << "[DEBUG] Scenario: Full Auto (*)" << std::endl;
-                long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
-                final_id.ms = std::max(now_ms, last_id.ms);
-                final_id.seq = (final_id.ms == last_id.ms) ? last_id.seq + 1 : 0;
-                if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
-            } 
-            else if (id_req.find("-*") != std::string::npos) {
-                std::cout << "[DEBUG] Scenario: Partial Auto (ms-*)" << std::endl;
-                long long req_ms = std::stoll(id_req.substr(0, id_req.find("-*")));
-                if (req_ms < last_id.ms) {
-                    std::cout << "[DEBUG] Error: ms too small" << std::endl;
-                    std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-                    send(client_fd, err.c_str(), err.length(), 0);
-                    return;
-                }
-                final_id.ms = req_ms;
-                final_id.seq = (req_ms == last_id.ms) ? last_id.seq + 1 : 0;
-                if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
-            } 
-            else {
-                std::cout << "[DEBUG] Scenario: Explicit ID" << std::endl;
-                final_id = StreamID::parse(id_req);
-                std::cout << "[DEBUG] Parsed final_id: " << final_id.toString() << std::endl;
-
-                if (final_id.ms == 0 && final_id.seq == 0) {
-                    std::cout << "[DEBUG] Error: ID is 0-0" << std::endl;
-                    std::string err = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-                    send(client_fd, err.c_str(), err.length(), 0);
-                    continue;
-                }
-                
-                // PAY ATTENTION HERE: This is where 0-3 vs 1-2 should fail
-                if (!stream.empty() && !(final_id > last_id)) {
-                    std::cout << "[DEBUG] Error: ID not monotonic. final_id <= last_id" << std::endl;
-                    std::string err = "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
-                    send(client_fd, err.c_str(), err.length(), 0);
-                    continue;
-                }
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[CRASH] Exception in ID logic: " << e.what() << std::endl;
-            return; // This would cause "no content received"
-        }
-
-        std::cout << "[DEBUG] Validation passed. Saving entry." << std::endl;
-        StreamEntry entry;
-        entry.id = final_id;
-        for (size_t i = 3; i + 1 < request.elements.size(); i += 2) {
-            entry.fields.push_back({request.elements[i].bulkString, request.elements[i+1].bulkString});
-        }
-        stream.push_back(entry);
-
-        std::string id_str = final_id.toString();
-        std::string resp = "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
-        std::cout << "[DEBUG] Sending response: " << id_str << std::endl;
-        send(client_fd, resp.c_str(), resp.length(), 0);
-        
-        expiry_cv.notify_all();
-    }
-
-    else if (command == "XRANGE" && request.elements.size() >= 4) {
-    std::string key = request.elements[1].bulkString;
-    StreamID start_id = StreamID::parseRange(request.elements[2].bulkString, true);
-    StreamID end_id = StreamID::parseRange(request.elements[3].bulkString, false);
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-    
-    auto it = key_value_store.find(key);
-    if (it == key_value_store.end() || it->second.type != KeyType::Stream) {
-        send(client_fd, "*0\r\n", 4, 0);
-    } else {
-        auto& stream = std::get<std::vector<StreamEntry>>(it->second.value);
-
-        // 1. Binary Search for the start iterator (First element >= start_id)
-        auto start_it = std::lower_bound(stream.begin(), stream.end(), start_id, 
-            [](const StreamEntry& e, const StreamID& id) { return e.id < id; });
-
-        // 2. Binary Search for the end iterator (First element > end_id)
-        auto end_it = std::upper_bound(stream.begin(), stream.end(), end_id, 
-            [](const StreamID& id, const StreamEntry& e) { return id < e.id; });
-
-        // 3. Calculate count and send RESP Array Header
-        long long count = std::distance(start_it, end_it);
-        if (count < 0) count = 0;
-        
-        std::string header = "*" + std::to_string(count) + "\r\n";
-        send(client_fd, header.c_str(), header.length(), 0);
-
-        // 4. Loop through the range
-        for (auto entry_it = start_it; entry_it != end_it; ++entry_it) {
-            const auto& entry = *entry_it;
-            
-            // Each entry is an array: [ID, [field1, value1, field2, value2...]]
-            std::string entry_resp = "*2\r\n";
-            
-            // Send ID
-            std::string id_str = entry.id.toString();
-            entry_resp += "$" + std::to_string(id_str.length()) + "\r\n" + id_str + "\r\n";
-            
-            // Send Fields Array
-            entry_resp += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
-            for (const auto& pair : entry.fields) {
-                entry_resp += "$" + std::to_string(pair.first.length()) + "\r\n" + pair.first + "\r\n";
-                entry_resp += "$" + std::to_string(pair.second.length()) + "\r\n" + pair.second + "\r\n";
-            }
-            
-            send(client_fd, entry_resp.c_str(), entry_resp.length(), 0);
-        }
-    }
-}
-else if (command == "XREAD") {
+          else if (command == "XRANGE" && request.elements.size() >= 4) {
+                execute_command(client_fd, request);
+          }
+          
+          else if (command == "XREAD") {
     std::cout << "[DEBUG] Entering XREAD" << std::endl;
     long long block_ms = -1; 
     int streams_keyword_pos = -1;
@@ -432,63 +248,12 @@ else if (command == "XREAD") {
     }
 }
 
-else if (command == "INCR" && request.elements.size() >= 2) {
-    std::string key = request.elements[1].bulkString;
+          else if (command == "INCR" && request.elements.size() >= 2) {
+                execute_command(client_fd, request);
+          }
 
-    std::lock_guard<std::mutex> lock(store_mutex);
-    
-    // 1. Check if key exists
-    if (key_value_store.find(key) == key_value_store.end()) {
-        // Case: Key doesn't exist. Create it with "1"
-        Node n;
-        n.type = KeyType::String;
-        n.value = "1"; 
-        n.hasTTL = false;
-        key_value_store[key] = n;
-
-        send(client_fd, ":1\r\n", 4, 0);
-    } 
-    else {
-        Node &node = key_value_store[key];
-
-        // 2. Type Check: Must be a String
-        if (node.type != KeyType::String) {
-            std::string err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
-            send(client_fd, err.c_str(), err.length(), 0);
-        } 
-        else {
-            // 3. Extract string and attempt to parse as integer
-            std::string& val_str = std::get<std::string>(node.value);
-            
-            try {
-                size_t processed_char_count = 0;
-                long long current_val = std::stoll(val_str, &processed_char_count);
-
-                // Strict Check: stoll can parse "10hello" as 10. 
-                // Redis requires the WHOLE string to be the number.
-                if (processed_char_count != val_str.length()) {
-                    throw std::invalid_argument("trailing characters");
-                }
-
-                // 4. Increment and update
-                current_val++;
-                node.value = std::to_string(current_val);
-
-                // 5. Respond with Integer RESP (starts with ':')
-                std::string resp = ":" + std::to_string(current_val) + "\r\n";
-                send(client_fd, resp.c_str(), resp.length(), 0);
-
-            } catch (...) {
-                // Catches stoll failures (non-numeric strings) and overflows
-                std::string err = "-ERR value is not an integer or out of range\r\n";
-                send(client_fd, err.c_str(), err.length(), 0);
-            }
-        }
-    }
-}
-
-else if (command == "MULTI") {
-    std::cout << "[DEBUG] Received MULTI command" << std::endl;
+          else if (command == "MULTI") {
+                std::cout << "[DEBUG] Received MULTI command" << std::endl;
                 if (in_transaction) {
                     send(client_fd, "-ERR MULTI calls can not be nested\r\n", 37, 0);
                 } else {
@@ -500,7 +265,7 @@ else if (command == "MULTI") {
             }
 
             // --- 2. DISCARD Command Logic ---
-            else if (command == "DISCARD") {
+          else if (command == "DISCARD") {
                 if (!in_transaction) {
                     send(client_fd, "-ERR DISCARD without MULTI\r\n", 28, 0);
                 } else {
@@ -511,29 +276,29 @@ else if (command == "MULTI") {
                 continue;
             }
 
-else if (command == "EXEC") {
-    if (!in_transaction) {
-        send(client_fd, "-ERR EXEC without MULTI\r\n", 25, 0);
-    } else {
-        in_transaction = false; // Reset state immediately
-        
-        if (command_queue.empty()) {
-            send(client_fd, "*0\r\n", 4, 0);
-        } else {
-            // Start the response array
-            std::string multi_resp = "*" + std::to_string(command_queue.size()) + "\r\n";
-            send(client_fd, multi_resp.c_str(), multi_resp.length(), 0);
+          else if (command == "EXEC") {
+            if (!in_transaction) {
+                send(client_fd, "-ERR EXEC without MULTI\r\n", 25, 0);
+            } else {
+                in_transaction = false; // Reset state immediately
+                
+                if (command_queue.empty()) {
+                    send(client_fd, "*0\r\n", 4, 0);
+                } else {
+                    // Start the response array
+                    std::string multi_resp = "*" + std::to_string(command_queue.size()) + "\r\n";
+                    send(client_fd, multi_resp.c_str(), multi_resp.length(), 0);
 
-            // Here is where the refactor pays off!
-            // You can call your execute_command helper for each one.
-            for (const auto& cmd : command_queue) {
-                // Pass the client_fd to your command dispatcher
-                execute_command(client_fd, cmd); 
+                    // Here is where the refactor pays off!
+                    // You can call your execute_command helper for each one.
+                    for (const auto& cmd : command_queue) {
+                        // Pass the client_fd to your command dispatcher
+                        execute_command(client_fd, cmd); 
+                    }
+                    command_queue.clear();
+                }
             }
-            command_queue.clear();
         }
-    }
-}
 
       }
     }
