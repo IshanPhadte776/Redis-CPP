@@ -41,12 +41,13 @@ void handle_watch(int fd, const RespValue& req,
                   std::unordered_map<std::string, std::uint64_t>& watch_versions,
                   std::uint64_t& watch_flush_epoch);
 
-// Runs EXEC under store_mutex: validates WATCH, sends *-1 on conflict, else runs the queue.
+// Validates WATCH with store_mutex held, then runs queued commands (lock released so BLPOP can wait).
 void execute_transaction_exec(int client_fd, std::vector<RespValue>& command_queue,
                               std::unordered_map<std::string, std::uint64_t>& watch_versions,
                               std::uint64_t& watch_flush_epoch);
 
-// Must be called with store_mutex already held.
+// store_bump_key_revision: must be called with store_mutex held.
+// store_note_database_flush: increments global flush counter; call with store_mutex held.
 void store_bump_key_revision(const std::string& key);
 void store_note_database_flush();
 

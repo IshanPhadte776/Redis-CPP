@@ -701,7 +701,6 @@ void execute_command_for_exec(int client_fd, const RespValue& request) {
 void execute_transaction_exec(int client_fd, std::vector<RespValue>& command_queue,
                                 std::unordered_map<std::string, std::uint64_t>& watch_versions,
                                 std::uint64_t& watch_flush_epoch) {
-    std::lock_guard<std::mutex> lock(store_mutex);
     const char* null_exec = "*-1\r\n";
 
     auto abort_exec = [&]() {
@@ -711,34 +710,38 @@ void execute_transaction_exec(int client_fd, std::vector<RespValue>& command_que
         command_queue.clear();
     };
 
-    if (!watch_versions.empty()) {
-        if (watch_flush_epoch != global_flush_epoch) {
-            abort_exec();
-            return;
-        }
-        for (const auto& entry : watch_versions) {
-            auto it = key_versions.find(entry.first);
-            const std::uint64_t cur = (it == key_versions.end() ? 0 : it->second);
-            if (cur != entry.second) {
+    std::vector<RespValue> pending;
+    {
+        std::lock_guard<std::mutex> lock(store_mutex);
+        if (!watch_versions.empty()) {
+            if (watch_flush_epoch != global_flush_epoch) {
                 abort_exec();
                 return;
             }
+            for (const auto& entry : watch_versions) {
+                auto it = key_versions.find(entry.first);
+                const std::uint64_t cur = (it == key_versions.end() ? 0 : it->second);
+                if (cur != entry.second) {
+                    abort_exec();
+                    return;
+                }
+            }
         }
+
+        watch_versions.clear();
+        watch_flush_epoch = 0;
+        pending = std::move(command_queue);
     }
 
-    watch_versions.clear();
-    watch_flush_epoch = 0;
-
-    if (command_queue.empty()) {
+    if (pending.empty()) {
         send(client_fd, "*0\r\n", 4, 0);
         return;
     }
 
-    std::string header = "*" + std::to_string(command_queue.size()) + "\r\n";
+    std::string header = "*" + std::to_string(pending.size()) + "\r\n";
     send(client_fd, header.c_str(), static_cast<int>(header.length()), 0);
-    for (const auto& cmd : command_queue) {
+    for (const auto& cmd : pending) {
         execute_command_for_exec(client_fd, cmd);
     }
-    command_queue.clear();
 }
 

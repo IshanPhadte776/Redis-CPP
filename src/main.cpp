@@ -6,8 +6,8 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
+#include <cstdint>
 #include <queue>
 #include <chrono>
 #include <algorithm>
@@ -22,6 +22,8 @@
 
 // Map: Key Name -> Vector of Nodes
 std::unordered_map<std::string, Node> key_value_store;
+std::unordered_map<std::string, std::uint64_t> key_versions;
+std::uint64_t global_flush_epoch = 0;
 std::mutex store_mutex;
 std::condition_variable expiry_cv;
 std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEntry>> expiry_heap;
@@ -51,6 +53,7 @@ void background_cleanup() {
                 // the heap now has TWO entries for the same key. We only delete if 
                 // the node's current expires_at matches the one we just popped.
                 if (node.hasTTL && node.expires_at == entry.expires_at) {
+                    store_bump_key_revision(entry.key);
                     key_value_store.erase(entry.key);
                     std::cout << "[Cleanup] Evicted expired key: " << entry.key << "\n";
                     
@@ -70,7 +73,8 @@ void handle_client(int client_fd) {
     char buffer[1024];
     bool in_transaction = false;
     std::vector<RespValue> command_queue;
-    std::unordered_set<std::string> watched_keys;
+    std::unordered_map<std::string, std::uint64_t> watch_versions;
+    std::uint64_t watch_flush_epoch = 0;
     while (true) {
         ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer), 0);
         if (bytes_received <= 0) break;
@@ -101,23 +105,14 @@ void handle_client(int client_fd) {
                 if (command == "DISCARD") {
                     in_transaction = false;
                     command_queue.clear();
-                    watched_keys.clear();
+                    watch_versions.clear();
+                    watch_flush_epoch = 0;
                     send(client_fd, "+OK\r\n", 5, 0);
                     continue;
                 }
                 if (command == "EXEC") {
                     in_transaction = false;
-                    watched_keys.clear();
-                    if (command_queue.empty()) {
-                        send(client_fd, "*0\r\n", 4, 0);
-                    } else {
-                        std::string multi_resp = "*" + std::to_string(command_queue.size()) + "\r\n";
-                        send(client_fd, multi_resp.c_str(), multi_resp.length(), 0);
-                        for (const auto& cmd : command_queue) {
-                            execute_command_for_exec(client_fd, cmd);
-                        }
-                        command_queue.clear();
-                    }
+                    execute_transaction_exec(client_fd, command_queue, watch_versions, watch_flush_epoch);
                     continue;
                 }
                 command_queue.push_back(request);
@@ -291,7 +286,7 @@ void handle_client(int client_fd) {
           }
 
           else if (command == "WATCH") {
-                handle_watch(client_fd, request, watched_keys);
+                handle_watch(client_fd, request, watch_versions, watch_flush_epoch);
             }
 
           else if (command == "MULTI") {
