@@ -327,7 +327,25 @@ void handle_client(int client_fd) {
 // ==========================================
 // 5. Main Entry Point
 // ==========================================
-int main() {
+int main(int argc, char* argv[]) {
+    int port = 6379;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--port") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --port requires a value\n";
+                return 1;
+            }
+            char* end = nullptr;
+            long parsed = std::strtol(argv[i + 1], &end, 10);
+            if (end == argv[i + 1] || *end != '\0' || parsed < 1 || parsed > 65535) {
+                std::cerr << "error: invalid port: " << argv[i + 1] << "\n";
+                return 1;
+            }
+            port = static_cast<int>(parsed);
+            ++i;
+        }
+    }
+
     std::cout << std::unitbuf;
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int reuse = 1;
@@ -336,14 +354,14 @@ int main() {
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(6379);
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
 
     bind(server_fd, (struct sockaddr*)&addr, sizeof(addr));
     listen(server_fd, 5);
 
     std::thread(background_cleanup).detach();
 
-    std::cout << "Server listening on port 6379...\n";
+    std::cout << "Server listening on port " << port << "...\n";
 
     while (true) {
         struct sockaddr_in client_addr;
