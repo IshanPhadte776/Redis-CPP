@@ -435,16 +435,26 @@ void handle_xadd(int fd, const RespValue& request) {
         } else if (id_req.find("-*") != std::string::npos) {
             long long req_ms = std::stoll(id_req.substr(0, id_req.find("-*")));
             if (req_ms < last_id.ms) {
-                send(fd, "-ERR The ID specified in XADD is equal or smaller...\r\n", 54, 0);
+                const char* err =
+                    "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                send(fd, err, strlen(err), 0);
                 return;
             }
             final_id.ms = req_ms;
             final_id.seq = (req_ms == last_id.ms) ? last_id.seq + 1 : 0;
             if (final_id.ms == 0 && final_id.seq == 0) final_id.seq = 1;
         } else {
+            // Explicit ID only (Codecrafters HQ8): Redis distinguishes 0-0 from other invalid IDs.
             final_id = StreamID::parse(id_req);
-            if ((final_id.ms == 0 && final_id.seq == 0) || (final_id <= last_id)) {
-                send(fd, "-ERR The ID specified in XADD is invalid or not monotonic\r\n", 58, 0);
+            if (final_id.ms == 0 && final_id.seq == 0) {
+                const char* err = "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+                send(fd, err, strlen(err), 0);
+                return;
+            }
+            if (!stream.empty() && final_id <= last_id) {
+                const char* err =
+                    "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                send(fd, err, strlen(err), 0);
                 return;
             }
         }
