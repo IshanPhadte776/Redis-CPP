@@ -1,4 +1,3 @@
-#pragma once
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -9,6 +8,7 @@
 #include <condition_variable>
 #include <queue>
 #include <cstring>
+#include <stdexcept>
 #include "commands.h"
 #include "respparser.h" // Wherever your RespValue struct is
 #include "dataStructures.h" // Wherever your Node struct and key_value_store are
@@ -193,7 +193,11 @@ void handle_incr(int fd, const RespValue& request) {
 
 // --- RPUSH ---
 void handle_rpush(int fd, const RespValue& request) {
-    if (request.elements.size() < 3) return;
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'rpush' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
     std::string key = request.elements[1].bulkString;
     std::lock_guard<std::mutex> lock(store_mutex);
     Node &node = key_value_store[key];
@@ -203,7 +207,8 @@ void handle_rpush(int fd, const RespValue& request) {
         node.value = std::vector<std::string>{};
     }
     if (node.type != KeyType::List) {
-        send(fd, "-WRONGTYPE ...\r\n", 16, 0);
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
         return;
     }
 
@@ -219,7 +224,11 @@ void handle_rpush(int fd, const RespValue& request) {
 
 // --- LPUSH ---
 void handle_lpush(int fd, const RespValue& request) {
-    if (request.elements.size() < 3) return;
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'lpush' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
     std::string key = request.elements[1].bulkString;
     std::lock_guard<std::mutex> lock(store_mutex);
     Node &node = key_value_store[key];
@@ -229,7 +238,8 @@ void handle_lpush(int fd, const RespValue& request) {
         node.value = std::vector<std::string>{};
     }
     if (node.type != KeyType::List) {
-        send(fd, "-WRONGTYPE ...\r\n", 16, 0);
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
         return;
     }
 
@@ -245,10 +255,22 @@ void handle_lpush(int fd, const RespValue& request) {
 
 // --- LRANGE ---
 void handle_lrange(int fd, const RespValue& request) {
-    if (request.elements.size() < 4) return;
+    if (request.elements.size() < 4) {
+        const char* err = "-ERR wrong number of arguments for 'lrange' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
     std::string key = request.elements[1].bulkString;
-    long long start = std::stoll(request.elements[2].bulkString);
-    long long stop = std::stoll(request.elements[3].bulkString);
+    long long start;
+    long long stop;
+    try {
+        start = std::stoll(request.elements[2].bulkString);
+        stop = std::stoll(request.elements[3].bulkString);
+    } catch (...) {
+        const char* err = "-ERR value is not an integer or out of range\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
 
     std::lock_guard<std::mutex> lock(store_mutex);
     auto it = key_value_store.find(key);
@@ -280,7 +302,11 @@ void handle_lrange(int fd, const RespValue& request) {
 
 // --- LLEN ---
 void handle_llen(int fd, const RespValue& request) {
-    if (request.elements.size() < 2) return;
+    if (request.elements.size() < 2) {
+        const char* err = "-ERR wrong number of arguments for 'llen' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
     std::string key = request.elements[1].bulkString;
     std::lock_guard<std::mutex> lock(store_mutex);
     
@@ -295,10 +321,23 @@ void handle_llen(int fd, const RespValue& request) {
 
 // --- LPOP ---
 void handle_lpop(int fd, const RespValue& request) {
-    if (request.elements.size() < 2) return;
+    if (request.elements.size() < 2) {
+        const char* err = "-ERR wrong number of arguments for 'lpop' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
     std::string key = request.elements[1].bulkString;
     bool has_count = (request.elements.size() >= 3);
-    int count = has_count ? std::stoi(request.elements[2].bulkString) : 1;
+    int count = 1;
+    if (has_count) {
+        try {
+            count = std::stoi(request.elements[2].bulkString);
+        } catch (...) {
+            const char* err = "-ERR value is not an integer or out of range\r\n";
+            send(fd, err, strlen(err), 0);
+            return;
+        }
+    }
 
     std::lock_guard<std::mutex> lock(store_mutex);
     auto it = key_value_store.find(key);
@@ -306,7 +345,8 @@ void handle_lpop(int fd, const RespValue& request) {
     if (it == key_value_store.end()) {
         send(fd, "$-1\r\n", 5, 0);
     } else if (it->second.type != KeyType::List) {
-        send(fd, "-WRONGTYPE ...\r\n", 16, 0);
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
     } else {
         auto& list = std::get<std::vector<std::string>>(it->second.value);
         if (has_count && count <= 0) {
@@ -335,9 +375,20 @@ void handle_lpop(int fd, const RespValue& request) {
 }
 
 void handle_blpop(int fd, const RespValue& request) {
-    if (request.elements.size() < 3) return;
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'blpop' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
     std::string key = request.elements[1].bulkString;
-    double timeout_sec = std::stod(request.elements.back().bulkString);
+    double timeout_sec;
+    try {
+        timeout_sec = std::stod(request.elements.back().bulkString);
+    } catch (...) {
+        const char* err = "-ERR value is not a valid float\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
 
     std::unique_lock<std::mutex> lock(store_mutex);
 
@@ -380,7 +431,11 @@ void handle_blpop(int fd, const RespValue& request) {
 }
 
 void handle_type(int fd, const RespValue& request) {
-    if (request.elements.size() < 2) return;
+    if (request.elements.size() < 2) {
+        const char* err = "-ERR wrong number of arguments for 'type' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
     std::string key = request.elements[1].bulkString;
     std::string result = "none";
 
@@ -585,6 +640,26 @@ void execute_command(int client_fd, const RespValue& request) {
         std::string err = "-ERR unknown command '" + cmd_name + "'\r\n";
         send(client_fd, err.c_str(), err.length(), 0);
 
+    }
+}
+
+void execute_command_for_exec(int client_fd, const RespValue& request) {
+    if (request.elements.empty()) {
+        const char* err = "-ERR wrong number of arguments for 'exec' command\r\n";
+        send(client_fd, err, strlen(err), 0);
+        return;
+    }
+    try {
+        execute_command(client_fd, request);
+    } catch (const std::invalid_argument&) {
+        const char* err = "-ERR value is not an integer or out of range\r\n";
+        send(client_fd, err, strlen(err), 0);
+    } catch (const std::out_of_range&) {
+        const char* err = "-ERR value is not an integer or out of range\r\n";
+        send(client_fd, err, strlen(err), 0);
+    } catch (...) {
+        const char* err = "-ERR unexpected error processing queued command\r\n";
+        send(client_fd, err, strlen(err), 0);
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
-#define COMMANDS_H
 #ifndef COMMANDS_H
+#define COMMANDS_H
+
 #include "respparser.h"
 
 #include <functional>
@@ -34,6 +35,7 @@ void handle_type(int fd, const RespValue& req);
 
 void execute_command(int client_fd, const RespValue& request);
 
-
+// Used by MULTI/EXEC: guarantees exactly one RESP reply per queued command (errors inline in the EXEC array).
+void execute_command_for_exec(int client_fd, const RespValue& request);
 
 #endif // COMMANDS_H

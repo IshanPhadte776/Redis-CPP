@@ -62,8 +62,6 @@ void background_cleanup() {
     }
 }
 
-void execute_command(int client_fd, const RespValue& request);
-
 // ==========================================
 // 4. Client Handler
 // ==========================================
@@ -107,7 +105,7 @@ void handle_client(int client_fd) {
                         std::string multi_resp = "*" + std::to_string(command_queue.size()) + "\r\n";
                         send(client_fd, multi_resp.c_str(), multi_resp.length(), 0);
                         for (const auto& cmd : command_queue) {
-                            execute_command(client_fd, cmd);
+                            execute_command_for_exec(client_fd, cmd);
                         }
                         command_queue.clear();
                     }
