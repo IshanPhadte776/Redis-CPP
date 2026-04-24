@@ -487,6 +487,13 @@ void handle_watch(int fd, const RespValue& request,
     send(fd, "+OK\r\n", 5, 0);
 }
 
+void handle_unwatch(int fd, std::unordered_map<std::string, std::uint64_t>& watch_versions,
+                     std::uint64_t& watch_flush_epoch) {
+    watch_versions.clear();
+    watch_flush_epoch = 0;
+    send(fd, "+OK\r\n", 5, 0);
+}
+
 void handle_xadd(int fd, const RespValue& request) {
     // XADD key id field value [field value ...] — at least one field/value pair after id.
     if (request.elements.size() < 5 || (request.elements.size() - 3) % 2 != 0) {
@@ -682,6 +689,12 @@ void execute_command_for_exec(int client_fd, const RespValue& request) {
     if (request.elements.empty()) {
         const char* err = "-ERR wrong number of arguments for 'exec' command\r\n";
         send(client_fd, err, strlen(err), 0);
+        return;
+    }
+    std::string cmd_name = request.elements[0].bulkString;
+    std::transform(cmd_name.begin(), cmd_name.end(), cmd_name.begin(), ::toupper);
+    if (cmd_name == "UNWATCH") {
+        send(client_fd, "+OK\r\n", 5, 0);
         return;
     }
     try {

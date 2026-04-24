@@ -102,6 +102,11 @@ void handle_client(int client_fd) {
                     send(client_fd, err, static_cast<int>(strlen(err)), 0);
                     continue;
                 }
+                if (command == "UNWATCH") {
+                    command_queue.push_back(request);
+                    send(client_fd, "+QUEUED\r\n", 9, 0);
+                    continue;
+                }
                 if (command == "DISCARD") {
                     in_transaction = false;
                     command_queue.clear();
@@ -287,6 +292,10 @@ void handle_client(int client_fd) {
 
           else if (command == "WATCH") {
                 handle_watch(client_fd, request, watch_versions, watch_flush_epoch);
+            }
+
+          else if (command == "UNWATCH") {
+                handle_unwatch(client_fd, watch_versions, watch_flush_epoch);
             }
 
           else if (command == "MULTI") {

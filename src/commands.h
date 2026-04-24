@@ -41,6 +41,9 @@ void handle_watch(int fd, const RespValue& req,
                   std::unordered_map<std::string, std::uint64_t>& watch_versions,
                   std::uint64_t& watch_flush_epoch);
 
+void handle_unwatch(int fd, std::unordered_map<std::string, std::uint64_t>& watch_versions,
+                     std::uint64_t& watch_flush_epoch);
+
 // Validates WATCH with store_mutex held, then runs queued commands (lock released so BLPOP can wait).
 void execute_transaction_exec(int client_fd, std::vector<RespValue>& command_queue,
                               std::unordered_map<std::string, std::uint64_t>& watch_versions,
