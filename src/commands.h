@@ -6,8 +6,9 @@
 
 #include <functional>
 #include <unordered_map>
-#include <unordered_set>
 #include <string>
+#include <cstdint>
+#include <vector>
 
 // Core Commands
 void handle_ping(int fd, const RespValue& req);
@@ -35,8 +36,19 @@ void handle_xread(int fd, const RespValue& req);
 // Generic Commands
 void handle_type(int fd, const RespValue& req);
 
-// Transactions (optimistic locking): per-client watched keys live in main's handle_client.
-void handle_watch(int fd, const RespValue& req, std::unordered_set<std::string>& watched_keys);
+// Transactions (optimistic locking): per-client state lives in main's handle_client.
+void handle_watch(int fd, const RespValue& req,
+                  std::unordered_map<std::string, std::uint64_t>& watch_versions,
+                  std::uint64_t& watch_flush_epoch);
+
+// Runs EXEC under store_mutex: validates WATCH, sends *-1 on conflict, else runs the queue.
+void execute_transaction_exec(int client_fd, std::vector<RespValue>& command_queue,
+                              std::unordered_map<std::string, std::uint64_t>& watch_versions,
+                              std::uint64_t& watch_flush_epoch);
+
+// Must be called with store_mutex already held.
+void store_bump_key_revision(const std::string& key);
+void store_note_database_flush();
 
 void execute_command(int client_fd, const RespValue& request);
 
