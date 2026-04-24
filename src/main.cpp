@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <atomic>
 #include "respparser.h"
 #include "dataStructures.h"
 #include "commands.h"
@@ -30,6 +32,63 @@ std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEn
 
 // Set by --replicaof; INFO replication reports role:slave when true.
 bool server_is_replica = false;
+
+// Upstream TCP connection to master (replica mode); kept open after PING for later REPLCONF/PSYNC.
+std::atomic<int> g_replica_master_sock{-1};
+
+namespace {
+
+void replica_connect_and_send_ping(std::string master_host, int master_port) {
+    struct addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = nullptr;
+    const std::string port_str = std::to_string(master_port);
+    const int gai = getaddrinfo(master_host.c_str(), port_str.c_str(), &hints, &res);
+    if (gai != 0 || res == nullptr) {
+        std::cerr << "[replica] getaddrinfo(" << master_host << "): " << gai_strerror(gai) << "\n";
+        return;
+    }
+
+    int fd = -1;
+    for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) {
+            continue;
+        }
+        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
+            break;
+        }
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+
+    if (fd < 0) {
+        std::cerr << "[replica] connect to master " << master_host << ":" << master_port << " failed\n";
+        return;
+    }
+
+    static constexpr char kPing[] = "*1\r\n$4\r\nPING\r\n";
+    const ssize_t ping_len = static_cast<ssize_t>(sizeof(kPing) - 1);
+    if (send(fd, kPing, static_cast<size_t>(ping_len), 0) != ping_len) {
+        std::cerr << "[replica] send PING to master failed\n";
+        close(fd);
+        return;
+    }
+
+    char buf[256];
+    const ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) {
+        std::cerr << "[replica] recv after PING failed\n";
+        close(fd);
+        return;
+    }
+
+    g_replica_master_sock.store(fd);
+}
+
+} // namespace
 
 // ==========================================
 // 3. Background Cleanup (Active Expiry)
@@ -336,6 +395,9 @@ void handle_client(int client_fd) {
 // ==========================================
 int main(int argc, char* argv[]) {
     int port = 6379;
+    std::string replica_master_host;
+    int replica_master_port = 0;
+
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--port") == 0) {
             if (i + 1 >= argc) {
@@ -358,15 +420,47 @@ int main(int argc, char* argv[]) {
             server_is_replica = true;
             std::string spec(argv[i + 1]);
             if (spec.find(' ') != std::string::npos) {
+                const std::size_t sp = spec.find(' ');
+                replica_master_host = spec.substr(0, sp);
+                std::string port_part = spec.substr(sp + 1);
+                const std::size_t not_space = port_part.find_first_not_of(' ');
+                if (not_space != std::string::npos) {
+                    port_part = port_part.substr(not_space);
+                }
+                const std::size_t non_digit = port_part.find_first_not_of("0123456789");
+                if (non_digit != std::string::npos) {
+                    port_part = port_part.substr(0, non_digit);
+                }
+                char* end = nullptr;
+                const long mp = std::strtol(port_part.c_str(), &end, 10);
+                if (port_part.empty() || end != port_part.c_str() + port_part.size()
+                    || mp < 1 || mp > 65535) {
+                    std::cerr << "error: invalid master port in --replicaof\n";
+                    return 1;
+                }
+                replica_master_port = static_cast<int>(mp);
                 ++i;
             } else {
                 if (i + 2 >= argc) {
                     std::cerr << "error: --replicaof requires host and port\n";
                     return 1;
                 }
+                replica_master_host = argv[i + 1];
+                char* end = nullptr;
+                const long mp = std::strtol(argv[i + 2], &end, 10);
+                if (end == argv[i + 2] || *end != '\0' || mp < 1 || mp > 65535) {
+                    std::cerr << "error: invalid master port for --replicaof\n";
+                    return 1;
+                }
+                replica_master_port = static_cast<int>(mp);
                 i += 2;
             }
         }
+    }
+
+    if (server_is_replica && (replica_master_host.empty() || replica_master_port == 0)) {
+        std::cerr << "error: --replicaof requires host and port\n";
+        return 1;
     }
 
     std::cout << std::unitbuf;
@@ -385,6 +479,10 @@ int main(int argc, char* argv[]) {
     std::thread(background_cleanup).detach();
 
     std::cout << "Server listening on port " << port << "...\n";
+
+    if (server_is_replica) {
+        std::thread(replica_connect_and_send_ping, replica_master_host, replica_master_port).detach();
+    }
 
     while (true) {
         struct sockaddr_in client_addr;
