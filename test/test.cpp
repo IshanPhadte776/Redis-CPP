@@ -72,9 +72,9 @@ int main() {
 
     // 5. Streams
     client.send_cmd("*1\r\n$8\r\nFLUSHALL\r\n");
-    client.send_cmd("*4\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n1-1\r\n$1\r\na\r\n$1\r\nb\r\n");
-    log_test("XADD explicit", client.send_cmd("*4\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n1-2\r\n$1\r\nc\r\n$1\r\nd\r\n") == "$3\r\n1-2\r\n");
-    log_test("XADD smaller error", client.send_cmd("*4\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n0-1\r\n$1\r\nx\r\n$1\r\ny\r\n").find("-ERR") != std::string::npos);
+    client.send_cmd("*5\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n1-1\r\n$1\r\na\r\n$1\r\nb\r\n");
+    log_test("XADD explicit", client.send_cmd("*5\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n1-2\r\n$1\r\nc\r\n$1\r\nd\r\n") == "$3\r\n1-2\r\n");
+    log_test("XADD smaller error", client.send_cmd("*5\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n0-1\r\n$1\r\nx\r\n$1\r\ny\r\n").find("-ERR") != std::string::npos);
     
     // 6. XRANGE
     //client.send_cmd("*1\r\n$8\r\nFLUSHALL\r\n");
@@ -88,7 +88,7 @@ int main() {
     std::cout <<  client.send_cmd("*2\r\n$4\r\nTYPE\r\n$3\r\nnum\r\n");
     log_test("TYPE string", client.send_cmd("*2\r\n$4\r\nTYPE\r\n$3\r\nnum\r\n") == "+string\r\n");
     client.send_cmd("*1\r\n$8\r\nFLUSHALL\r\n");
-    client.send_cmd("*4\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n1-1\r\n$1\r\na\r\n$1\r\nb\r\n");
+    client.send_cmd("*5\r\n$4\r\nXADD\r\n$1\r\ns\r\n$3\r\n1-1\r\n$1\r\na\r\n$1\r\nb\r\n");
     log_test("TYPE stream", client.send_cmd("*2\r\n$4\r\nTYPE\r\n$1\r\ns\r\n") == "+stream\r\n");
     client.send_cmd("*1\r\n$8\r\nFLUSHALL\r\n");
     log_test("TYPE none", client.send_cmd("*2\r\n$4\r\nTYPE\r\n$7\r\nmissing\r\n") == "+none\r\n");

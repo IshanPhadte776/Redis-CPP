@@ -399,7 +399,13 @@ void handle_type(int fd, const RespValue& request) {
 }
 
 void handle_xadd(int fd, const RespValue& request) {
-    if (request.elements.size() < 3) return;
+    // XADD key id field value [field value ...] — at least one field/value pair after id.
+    if (request.elements.size() < 5 || (request.elements.size() - 3) % 2 != 0) {
+        const char* err = "-ERR wrong number of arguments for 'xadd' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
     std::string key = request.elements[1].bulkString;
     std::string id_req = request.elements[2].bulkString;
 
@@ -410,7 +416,8 @@ void handle_xadd(int fd, const RespValue& request) {
         node.type = KeyType::Stream;
         node.value = std::vector<StreamEntry>{};
     } else if (node.type != KeyType::Stream) {
-        send(fd, "-WRONGTYPE ...\r\n", 16, 0);
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
         return;
     }
 
@@ -441,7 +448,11 @@ void handle_xadd(int fd, const RespValue& request) {
                 return;
             }
         }
-    } catch (...) { return; }
+    } catch (...) {
+        const char* err = "-ERR Invalid stream ID specified for XADD command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
 
     StreamEntry entry;
     entry.id = final_id;

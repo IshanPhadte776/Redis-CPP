@@ -162,7 +162,7 @@ void handle_client(int client_fd) {
                 execute_command(client_fd, request);
          }
 
-          else if (command == "XADD" && request.elements.size() >= 3) {
+          else if (command == "XADD") {
                 execute_command(client_fd, request);
           }
 
