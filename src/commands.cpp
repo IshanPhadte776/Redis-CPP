@@ -472,6 +472,22 @@ void handle_type(int fd, const RespValue& request) {
     send(fd, resp.c_str(), resp.length(), 0);
 }
 
+void handle_info(int fd, const RespValue& request) {
+    std::string want;
+    if (request.elements.size() >= 2) {
+        want = request.elements[1].bulkString;
+        std::transform(want.begin(), want.end(), want.begin(), ::tolower);
+    }
+
+    std::string payload;
+    if (want.empty() || want == "replication") {
+        payload = "# Replication\r\nrole:master\r\n";
+    }
+
+    std::string out = "$" + std::to_string(payload.size()) + "\r\n" + payload + "\r\n";
+    send(fd, out.c_str(), out.length(), 0);
+}
+
 void handle_watch(int fd, const RespValue& request,
                   std::unordered_map<std::string, std::uint64_t>& watch_versions,
                   std::uint64_t& watch_flush_epoch) {
@@ -662,7 +678,8 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     // {"XREAD",    handle_xread},
 
     // // Metadata
-    {"TYPE",     handle_type}
+    {"TYPE",     handle_type},
+    {"INFO",     handle_info}
 };
 
 

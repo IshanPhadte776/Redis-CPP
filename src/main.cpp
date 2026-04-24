@@ -290,6 +290,10 @@ void handle_client(int client_fd) {
                 execute_command(client_fd, request);
           }
 
+          else if (command == "INFO") {
+                execute_command(client_fd, request);
+          }
+
           else if (command == "WATCH") {
                 handle_watch(client_fd, request, watch_versions, watch_flush_epoch);
             }

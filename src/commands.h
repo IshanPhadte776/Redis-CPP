@@ -35,6 +35,7 @@ void handle_xread(int fd, const RespValue& req);
 
 // Generic Commands
 void handle_type(int fd, const RespValue& req);
+void handle_info(int fd, const RespValue& req);
 
 // Transactions (optimistic locking): per-client state lives in main's handle_client.
 void handle_watch(int fd, const RespValue& req,
