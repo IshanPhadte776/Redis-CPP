@@ -786,6 +786,13 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
 };
 
 
+void replication_unregister_replica(int client_fd) {
+    std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
+    g_repl_targets.erase(
+        std::remove(g_repl_targets.begin(), g_repl_targets.end(), client_fd),
+        g_repl_targets.end());
+}
+
 void execute_command(int client_fd, const RespValue& request) {
     if (request.elements.empty()) return;
 
@@ -797,6 +804,9 @@ void execute_command(int client_fd, const RespValue& request) {
         it->second(client_fd, request);
         if (cmd_name == "SET" || cmd_name == "RPUSH" || cmd_name == "LPUSH") {
             expiry_cv.notify_all(); // Notify after modifying data that BLPOP/XREAD might be waiting on
+        }
+        if (!server_is_replica && command_propagates_to_replicas(cmd_name)) {
+            replication_propagate(request);
         }
     } else {
         std::string err = "-ERR unknown command '" + cmd_name + "'\r\n";

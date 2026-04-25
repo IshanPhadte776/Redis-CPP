@@ -3,6 +3,7 @@
 #include <string>
 #include <cstring>
 #include <unistd.h>
+#include <fcntl.h>
 #include <thread>
 #include <mutex>
 #include <unordered_map>
@@ -35,6 +36,9 @@ bool server_is_replica = false;
 
 // Upstream TCP connection to master (replica mode); kept open after PING for later REPLCONF/PSYNC.
 std::atomic<int> g_replica_master_sock{-1};
+
+// Replica: responses for commands applied from replication stream are discarded here.
+static int g_resp_sink_fd = -1;
 
 namespace {
 
@@ -127,6 +131,29 @@ bool replica_discard_bulk_payload(int fd, std::string& pending) {
         pending.erase(0, total);
         return true;
     }
+}
+
+void replica_apply_master_stream(int master_fd) {
+    std::string pending;
+    char buf[4096];
+    while (true) {
+        const ssize_t n = recv(master_fd, buf, sizeof(buf), 0);
+        if (n <= 0) {
+            break;
+        }
+        pending.append(buf, static_cast<std::size_t>(n));
+        if (pending.size() > static_cast<std::size_t>(1) << 20) {
+            break;
+        }
+        std::size_t consumed = 0;
+        RespValue cmd;
+        while (RespParser::try_parse_complete_array(pending, cmd, consumed)) {
+            pending.erase(0, consumed);
+            execute_command(g_resp_sink_fd, cmd);
+        }
+    }
+    close(master_fd);
+    g_replica_master_sock.store(-1);
 }
 
 std::string replconf_listening_port_payload(int listen_port) {
@@ -230,6 +257,7 @@ void replica_connect_and_send_ping(std::string master_host, int master_port, int
     }
 
     g_replica_master_sock.store(fd);
+    std::thread(replica_apply_master_stream, fd).detach();
 }
 
 } // namespace
@@ -534,6 +562,7 @@ void handle_client(int client_fd) {
 
       }
     }
+    replication_unregister_replica(client_fd);
     close(client_fd);
 }
 
@@ -614,6 +643,13 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << std::unitbuf;
+
+    g_resp_sink_fd = open("/dev/null", O_WRONLY);
+    if (g_resp_sink_fd < 0) {
+        std::cerr << "error: could not open /dev/null\n";
+        return 1;
+    }
+
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int reuse = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
