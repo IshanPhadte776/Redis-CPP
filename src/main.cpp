@@ -133,6 +133,22 @@ bool replica_discard_bulk_payload(int fd, std::string& pending) {
     }
 }
 
+bool replica_is_replconf_getack(const RespValue& cmd) {
+    if (cmd.type != RespType::Array || cmd.elements.size() != 3) {
+        return false;
+    }
+    std::string a = cmd.elements[0].bulkString;
+    std::string b = cmd.elements[1].bulkString;
+    const std::string& star = cmd.elements[2].bulkString;
+    for (char& ch : a) {
+        ch = static_cast<char>(::toupper(static_cast<unsigned char>(ch)));
+    }
+    for (char& ch : b) {
+        ch = static_cast<char>(::toupper(static_cast<unsigned char>(ch)));
+    }
+    return a == "REPLCONF" && b == "GETACK" && star == "*";
+}
+
 void replica_apply_master_stream(int master_fd) {
     std::string pending;
     char buf[4096];
@@ -149,6 +165,17 @@ void replica_apply_master_stream(int master_fd) {
         RespValue cmd;
         while (RespParser::try_parse_complete_array(pending, cmd, consumed)) {
             pending.erase(0, consumed);
+            if (replica_is_replconf_getack(cmd)) {
+                static constexpr char kReplconfAck0[] =
+                    "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n";
+                const ssize_t ack_len = static_cast<ssize_t>(sizeof(kReplconfAck0) - 1);
+                if (send(master_fd, kReplconfAck0, static_cast<std::size_t>(ack_len), 0) != ack_len) {
+                    close(master_fd);
+                    g_replica_master_sock.store(-1);
+                    return;
+                }
+                continue;
+            }
             execute_command(g_resp_sink_fd, cmd);
         }
     }
