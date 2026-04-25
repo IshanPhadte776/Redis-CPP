@@ -38,7 +38,42 @@ std::atomic<int> g_replica_master_sock{-1};
 
 namespace {
 
-void replica_connect_and_send_ping(std::string master_host, int master_port) {
+// Accumulates TCP bytes and returns true when the next complete RESP simple string (+...\r\n)
+// matches the expected payload after '+' (e.g. "PONG" for +PONG\r\n, "OK" for +OK\r\n).
+bool replica_read_simple_string(int fd, std::string& pending, const char* expect_after_plus) {
+    while (true) {
+        const std::size_t crlf = pending.find("\r\n");
+        if (crlf != std::string::npos) {
+            if (crlf < 1 || pending[0] != '+') {
+                return false;
+            }
+            const std::string payload = pending.substr(1, crlf - 1);
+            pending.erase(0, crlf + 2);
+            return payload == expect_after_plus;
+        }
+        char chunk[256];
+        const ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
+        if (n <= 0) {
+            return false;
+        }
+        pending.append(chunk, static_cast<std::size_t>(n));
+        if (pending.size() > 4096) {
+            return false;
+        }
+    }
+}
+
+std::string replconf_listening_port_payload(int listen_port) {
+    const std::string port_str = std::to_string(listen_port);
+    std::string s = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$";
+    s += std::to_string(port_str.size());
+    s += "\r\n";
+    s += port_str;
+    s += "\r\n";
+    return s;
+}
+
+void replica_connect_and_send_ping(std::string master_host, int master_port, int replica_listen_port) {
     struct addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -77,10 +112,35 @@ void replica_connect_and_send_ping(std::string master_host, int master_port) {
         return;
     }
 
-    char buf[256];
-    const ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) {
-        std::cerr << "[replica] recv after PING failed\n";
+    std::string pending;
+    if (!replica_read_simple_string(fd, pending, "PONG")) {
+        std::cerr << "[replica] expected +PONG after PING\n";
+        close(fd);
+        return;
+    }
+
+    const std::string replconf_port = replconf_listening_port_payload(replica_listen_port);
+    if (send(fd, replconf_port.data(), replconf_port.size(), 0) != static_cast<ssize_t>(replconf_port.size())) {
+        std::cerr << "[replica] send REPLCONF listening-port failed\n";
+        close(fd);
+        return;
+    }
+    if (!replica_read_simple_string(fd, pending, "OK")) {
+        std::cerr << "[replica] expected +OK after REPLCONF listening-port\n";
+        close(fd);
+        return;
+    }
+
+    static constexpr char kReplconfCapa[] =
+        "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+    const ssize_t capa_len = static_cast<ssize_t>(sizeof(kReplconfCapa) - 1);
+    if (send(fd, kReplconfCapa, static_cast<std::size_t>(capa_len), 0) != capa_len) {
+        std::cerr << "[replica] send REPLCONF capa psync2 failed\n";
+        close(fd);
+        return;
+    }
+    if (!replica_read_simple_string(fd, pending, "OK")) {
+        std::cerr << "[replica] expected +OK after REPLCONF capa\n";
         close(fd);
         return;
     }
@@ -481,7 +541,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Server listening on port " << port << "...\n";
 
     if (server_is_replica) {
-        std::thread(replica_connect_and_send_ping, replica_master_host, replica_master_port).detach();
+        std::thread(replica_connect_and_send_ping, replica_master_host, replica_master_port, port).detach();
     }
 
     while (true) {
