@@ -37,6 +37,9 @@ bool server_is_replica = false;
 // Upstream TCP connection to master (replica mode); kept open after PING for later REPLCONF/PSYNC.
 std::atomic<int> g_replica_master_sock{-1};
 
+// Replica: total bytes of RESP commands consumed from the master replication stream (post-handshake).
+std::atomic<std::uint64_t> g_replica_repl_offset{0};
+
 // Replica: responses for commands applied from replication stream are discarded here.
 static int g_resp_sink_fd = -1;
 
@@ -149,7 +152,27 @@ bool replica_is_replconf_getack(const RespValue& cmd) {
     return a == "REPLCONF" && b == "GETACK" && star == "*";
 }
 
+bool replica_send_all(int fd, const void* data, std::size_t len) {
+    const auto* p = static_cast<const char*>(data);
+    while (len > 0) {
+        const ssize_t n = send(fd, p, len, 0);
+        if (n <= 0) {
+            return false;
+        }
+        p += static_cast<std::size_t>(n);
+        len -= static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
+std::string replica_format_replconf_ack(std::uint64_t offset) {
+    const std::string num = std::to_string(offset);
+    return std::string("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$") + std::to_string(num.size()) + "\r\n" + num + "\r\n";
+}
+
 void replica_apply_master_stream(int master_fd) {
+    g_replica_repl_offset.store(0, std::memory_order_relaxed);
+
     std::string pending;
     char buf[4096];
     while (true) {
@@ -164,19 +187,21 @@ void replica_apply_master_stream(int master_fd) {
         std::size_t consumed = 0;
         RespValue cmd;
         while (RespParser::try_parse_complete_array(pending, cmd, consumed)) {
+            const std::size_t wire_bytes = consumed;
             pending.erase(0, consumed);
             if (replica_is_replconf_getack(cmd)) {
-                static constexpr char kReplconfAck0[] =
-                    "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n";
-                const ssize_t ack_len = static_cast<ssize_t>(sizeof(kReplconfAck0) - 1);
-                if (send(master_fd, kReplconfAck0, static_cast<std::size_t>(ack_len), 0) != ack_len) {
+                const std::uint64_t ack_val = g_replica_repl_offset.load(std::memory_order_relaxed);
+                const std::string ack_frame = replica_format_replconf_ack(ack_val);
+                if (!replica_send_all(master_fd, ack_frame.data(), ack_frame.size())) {
                     close(master_fd);
                     g_replica_master_sock.store(-1);
                     return;
                 }
+                g_replica_repl_offset.fetch_add(wire_bytes, std::memory_order_relaxed);
                 continue;
             }
             execute_command(g_resp_sink_fd, cmd);
+            g_replica_repl_offset.fetch_add(wire_bytes, std::memory_order_relaxed);
         }
     }
     close(master_fd);
