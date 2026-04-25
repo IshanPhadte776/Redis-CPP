@@ -86,6 +86,49 @@ bool replica_discard_simple_string_line(int fd, std::string& pending) {
     }
 }
 
+// After PSYNC, master sends $<len>\r\n then exactly len bytes (RDB; no trailing \r\n).
+bool replica_discard_bulk_payload(int fd, std::string& pending) {
+    while (true) {
+        const std::size_t crlf = pending.find("\r\n");
+        if (crlf == std::string::npos) {
+            char chunk[512];
+            const ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
+            if (n <= 0) {
+                return false;
+            }
+            pending.append(chunk, static_cast<std::size_t>(n));
+            if (pending.size() > 65536) {
+                return false;
+            }
+            continue;
+        }
+        if (crlf < 2 || pending[0] != '$') {
+            return false;
+        }
+        const std::string len_str = pending.substr(1, crlf - 1);
+        char* parse_end = nullptr;
+        const unsigned long long bulk_len = std::strtoull(len_str.c_str(), &parse_end, 10);
+        if (parse_end != len_str.c_str() + len_str.size() || bulk_len > 64 * 1024 * 1024) {
+            return false;
+        }
+        const std::size_t body_start = crlf + 2;
+        const std::size_t total = body_start + static_cast<std::size_t>(bulk_len);
+        while (pending.size() < total) {
+            char chunk[1024];
+            const ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
+            if (n <= 0) {
+                return false;
+            }
+            pending.append(chunk, static_cast<std::size_t>(n));
+            if (pending.size() > total + 65536) {
+                return false;
+            }
+        }
+        pending.erase(0, total);
+        return true;
+    }
+}
+
 std::string replconf_listening_port_payload(int listen_port) {
     const std::string port_str = std::to_string(listen_port);
     std::string s = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$";
@@ -177,6 +220,11 @@ void replica_connect_and_send_ping(std::string master_host, int master_port, int
     }
     if (!replica_discard_simple_string_line(fd, pending)) {
         std::cerr << "[replica] expected simple-string reply after PSYNC\n";
+        close(fd);
+        return;
+    }
+    if (!replica_discard_bulk_payload(fd, pending)) {
+        std::cerr << "[replica] expected RDB bulk payload after FULLRESYNC\n";
         close(fd);
         return;
     }
