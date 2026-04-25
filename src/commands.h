@@ -57,6 +57,9 @@ void execute_transaction_exec(int client_fd, std::vector<RespValue>& command_que
 void store_bump_key_revision(const std::string& key);
 void store_note_database_flush();
 
+// Master: remove `client_fd` from replication targets (call before close on disconnect).
+void replication_unregister_replica(int client_fd);
+
 void execute_command(int client_fd, const RespValue& request);
 
 // Used by MULTI/EXEC: guarantees exactly one RESP reply per queued command (errors inline in the EXEC array).

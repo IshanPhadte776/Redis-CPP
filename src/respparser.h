@@ -23,6 +23,8 @@
 
 #include <vector>
 #include <string>
+#include <cstddef>
+#include <stdexcept>
 
 // 1. Keep the Enum
 enum class RespType {
@@ -73,6 +75,78 @@ public:
             }
         }
         return value;
+    }
+
+    // Serialize a top-level RESP array of bulk strings (command shape from parse()).
+    static std::string serialize_array(const RespValue& req) {
+        std::string out;
+        if (req.type != RespType::Array) {
+            return out;
+        }
+        out += "*" + std::to_string(req.elements.size()) + "\r\n";
+        for (const auto& el : req.elements) {
+            const std::string& s = el.bulkString;
+            out += "$" + std::to_string(s.size()) + "\r\n" + s + "\r\n";
+        }
+        return out;
+    }
+
+    // If `raw` begins with a complete RESP array, fills `value` and sets `consumed`; otherwise returns false.
+    static bool try_parse_complete_array(const std::string& raw, RespValue& value, std::size_t& consumed) {
+        value = RespValue{};
+        consumed = 0;
+        if (raw.size() < 4 || raw[0] != '*') {
+            return false;
+        }
+        const std::size_t pos = raw.find("\r\n", 1);
+        if (pos == std::string::npos) {
+            return false;
+        }
+        int num_elements = 0;
+        try {
+            num_elements = std::stoi(raw.substr(1, pos - 1));
+        } catch (...) {
+            return false;
+        }
+        if (num_elements < 0) {
+            return false;
+        }
+        value.type = RespType::Array;
+        std::size_t current_pos = pos + 2;
+        for (int i = 0; i < num_elements; ++i) {
+            if (current_pos >= raw.size() || raw[current_pos] != '$') {
+                return false;
+            }
+            const std::size_t len_crlf = raw.find("\r\n", current_pos + 1);
+            if (len_crlf == std::string::npos) {
+                return false;
+            }
+            int str_len = 0;
+            try {
+                str_len = std::stoi(raw.substr(current_pos + 1, len_crlf - current_pos - 1));
+            } catch (...) {
+                return false;
+            }
+            current_pos = len_crlf + 2;
+            if (str_len < -1) {
+                return false;
+            }
+            RespValue element;
+            element.type = RespType::BulkString;
+            if (str_len == -1) {
+                element.bulkString.clear();
+                value.elements.push_back(std::move(element));
+                continue;
+            }
+            if (raw.size() < current_pos + static_cast<std::size_t>(str_len) + 2) {
+                return false;
+            }
+            element.bulkString = raw.substr(current_pos, static_cast<std::size_t>(str_len));
+            value.elements.push_back(std::move(element));
+            current_pos += static_cast<std::size_t>(str_len) + 2;
+        }
+        consumed = current_pos;
+        return true;
     }
 };
 

@@ -51,6 +51,46 @@ static constexpr std::uint8_t kEmptyRdb[] = {
 };
 constexpr std::size_t kEmptyRdbLen = sizeof(kEmptyRdb);
 
+std::mutex g_repl_targets_mutex;
+std::vector<int> g_repl_targets;
+
+bool command_propagates_to_replicas(const std::string& cmd_upper) {
+    return cmd_upper == "SET" || cmd_upper == "FLUSHALL" || cmd_upper == "INCR"
+        || cmd_upper == "RPUSH" || cmd_upper == "LPUSH" || cmd_upper == "LPOP"
+        || cmd_upper == "BLPOP" || cmd_upper == "XADD";
+}
+
+void replication_register_replica(int fd) {
+    if (server_is_replica) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
+    for (int existing : g_repl_targets) {
+        if (existing == fd) {
+            return;
+        }
+    }
+    g_repl_targets.push_back(fd);
+}
+
+void replication_propagate(const RespValue& request) {
+    if (server_is_replica) {
+        return;
+    }
+    const std::string payload = RespParser::serialize_array(request);
+    if (payload.empty()) {
+        return;
+    }
+    std::vector<int> targets;
+    {
+        std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
+        targets = g_repl_targets;
+    }
+    for (int repl_fd : targets) {
+        (void)send_all(repl_fd, payload.data(), payload.size());
+    }
+}
+
 } // namespace
 
 void store_bump_key_revision(const std::string& key) { key_versions[key]++; }
@@ -94,6 +134,7 @@ void handle_psync(int fd, const RespValue& request) {
     if (!send_all(fd, kEmptyRdb, kEmptyRdbLen)) {
         return;
     }
+    replication_register_replica(fd);
 }
 
 void handle_echo(int fd, const RespValue& request) {
