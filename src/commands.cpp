@@ -40,6 +40,11 @@ void handle_ping(int fd, const RespValue& request) {
     }
 }
 
+void handle_replconf(int fd, const RespValue& request) {
+    (void)request;
+    send(fd, "+OK\r\n", 5, 0);
+}
+
 void handle_echo(int fd, const RespValue& request) {
     if (request.elements.size() < 2) {
         send(fd, "-ERR wrong number of arguments for 'echo' command\r\n", 50, 0);
@@ -660,6 +665,7 @@ void handle_xrange(int fd, const RespValue& request) {
 std::unordered_map<std::string, std::function<void(int, const RespValue&)>> handlers = {
     // Basic
     {"PING",     handle_ping},
+    {"REPLCONF", handle_replconf},
     {"ECHO",     handle_echo},
     {"FLUSHALL", handle_flushall},
 
