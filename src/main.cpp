@@ -63,6 +63,29 @@ bool replica_read_simple_string(int fd, std::string& pending, const char* expect
     }
 }
 
+// Consumes the next RESP simple string (+...\r\n) without interpreting the payload.
+bool replica_discard_simple_string_line(int fd, std::string& pending) {
+    while (true) {
+        const std::size_t crlf = pending.find("\r\n");
+        if (crlf != std::string::npos) {
+            if (crlf < 1 || pending[0] != '+') {
+                return false;
+            }
+            pending.erase(0, crlf + 2);
+            return true;
+        }
+        char chunk[256];
+        const ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
+        if (n <= 0) {
+            return false;
+        }
+        pending.append(chunk, static_cast<std::size_t>(n));
+        if (pending.size() > 4096) {
+            return false;
+        }
+    }
+}
+
 std::string replconf_listening_port_payload(int listen_port) {
     const std::string port_str = std::to_string(listen_port);
     std::string s = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$";
@@ -141,6 +164,19 @@ void replica_connect_and_send_ping(std::string master_host, int master_port, int
     }
     if (!replica_read_simple_string(fd, pending, "OK")) {
         std::cerr << "[replica] expected +OK after REPLCONF capa\n";
+        close(fd);
+        return;
+    }
+
+    static constexpr char kPsync[] = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+    const ssize_t psync_len = static_cast<ssize_t>(sizeof(kPsync) - 1);
+    if (send(fd, kPsync, static_cast<std::size_t>(psync_len), 0) != psync_len) {
+        std::cerr << "[replica] send PSYNC failed\n";
+        close(fd);
+        return;
+    }
+    if (!replica_discard_simple_string_line(fd, pending)) {
+        std::cerr << "[replica] expected simple-string reply after PSYNC\n";
         close(fd);
         return;
     }
