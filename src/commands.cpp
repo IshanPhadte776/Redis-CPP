@@ -45,6 +45,19 @@ void handle_replconf(int fd, const RespValue& request) {
     send(fd, "+OK\r\n", 5, 0);
 }
 
+void handle_psync(int fd, const RespValue& request) {
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'psync' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+    static constexpr char kReplId[] = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+    std::string resp = "+FULLRESYNC ";
+    resp += kReplId;
+    resp += " 0\r\n";
+    send(fd, resp.c_str(), resp.length(), 0);
+}
+
 void handle_echo(int fd, const RespValue& request) {
     if (request.elements.size() < 2) {
         send(fd, "-ERR wrong number of arguments for 'echo' command\r\n", 50, 0);
@@ -666,6 +679,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     // Basic
     {"PING",     handle_ping},
     {"REPLCONF", handle_replconf},
+    {"PSYNC",    handle_psync},
     {"ECHO",     handle_echo},
     {"FLUSHALL", handle_flushall},
 

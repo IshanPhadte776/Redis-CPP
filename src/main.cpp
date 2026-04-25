@@ -289,6 +289,9 @@ void handle_client(int client_fd) {
             else if (command == "REPLCONF") {
                 execute_command(client_fd, request);
             }
+            else if (command == "PSYNC") {
+                execute_command(client_fd, request);
+            }
             else if (command == "ECHO" && request.elements.size() > 1) {
                 execute_command(client_fd, request);
             } 
