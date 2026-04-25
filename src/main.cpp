@@ -170,10 +170,10 @@ std::string replica_format_replconf_ack(std::uint64_t offset) {
     return std::string("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$") + std::to_string(num.size()) + "\r\n" + num + "\r\n";
 }
 
-void replica_apply_master_stream(int master_fd) {
+void replica_apply_master_stream(int master_fd, std::string initial_pending) {
     g_replica_repl_offset.store(0, std::memory_order_relaxed);
 
-    std::string pending;
+    std::string pending = std::move(initial_pending);
     char buf[4096];
     while (true) {
         const ssize_t n = recv(master_fd, buf, sizeof(buf), 0);
@@ -309,7 +309,7 @@ void replica_connect_and_send_ping(std::string master_host, int master_port, int
     }
 
     g_replica_master_sock.store(fd);
-    std::thread(replica_apply_master_stream, fd).detach();
+    std::thread(replica_apply_master_stream, fd, std::move(pending)).detach();
 }
 
 } // namespace
