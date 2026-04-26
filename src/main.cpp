@@ -70,6 +70,22 @@ void pubsub_remove_client_from_channels(
     }
 }
 
+void pubsub_remove_client_from_channel(int client_fd, const std::string& channel) {
+    auto subs_it = pubsub_channel_subscribers.find(channel);
+    if (subs_it == pubsub_channel_subscribers.end()) {
+        pubsub_channel_subscriber_counts.erase(channel);
+        return;
+    }
+
+    subs_it->second.erase(client_fd);
+    if (subs_it->second.empty()) {
+        pubsub_channel_subscribers.erase(subs_it);
+        pubsub_channel_subscriber_counts.erase(channel);
+    } else {
+        pubsub_channel_subscriber_counts[channel] = subs_it->second.size();
+    }
+}
+
 // Accumulates TCP bytes and returns true when the next complete RESP simple string (+...\r\n)
 // matches the expected payload after '+' (e.g. "PONG" for +PONG\r\n, "OK" for +OK\r\n).
 bool replica_read_simple_string(int fd, std::string& pending, const char* expect_after_plus) {
@@ -638,6 +654,43 @@ void handle_client(int client_fd) {
                     resp += "$" + std::to_string(channel.size()) + "\r\n" + channel + "\r\n";
                     resp += ":" + std::to_string(subscribed_channels.size()) + "\r\n";
                     send(client_fd, resp.c_str(), resp.size(), 0);
+                }
+            }
+            else if (command == "UNSUBSCRIBE") {
+                if (request.elements.size() < 2) {
+                    if (subscribed_channels.empty()) {
+                        static constexpr char kNoChannelUnsubscribe[] =
+                            "*3\r\n$11\r\nunsubscribe\r\n$-1\r\n:0\r\n";
+                        send(client_fd, kNoChannelUnsubscribe, sizeof(kNoChannelUnsubscribe) - 1, 0);
+                    } else {
+                        std::vector<std::string> channels_to_remove(
+                            subscribed_channels.begin(), subscribed_channels.end());
+                        for (const auto& channel : channels_to_remove) {
+                            {
+                                std::lock_guard<std::mutex> lock(pubsub_mutex);
+                                pubsub_remove_client_from_channel(client_fd, channel);
+                            }
+                            subscribed_channels.erase(channel);
+                            std::string resp = "*3\r\n";
+                            resp += "$11\r\nunsubscribe\r\n";
+                            resp += "$" + std::to_string(channel.size()) + "\r\n" + channel + "\r\n";
+                            resp += ":" + std::to_string(subscribed_channels.size()) + "\r\n";
+                            send(client_fd, resp.c_str(), resp.size(), 0);
+                        }
+                    }
+                } else {
+                    for (std::size_t i = 1; i < request.elements.size(); ++i) {
+                        const std::string& channel = request.elements[i].bulkString;
+                        if (subscribed_channels.erase(channel) > 0) {
+                            std::lock_guard<std::mutex> lock(pubsub_mutex);
+                            pubsub_remove_client_from_channel(client_fd, channel);
+                        }
+                        std::string resp = "*3\r\n";
+                        resp += "$11\r\nunsubscribe\r\n";
+                        resp += "$" + std::to_string(channel.size()) + "\r\n" + channel + "\r\n";
+                        resp += ":" + std::to_string(subscribed_channels.size()) + "\r\n";
+                        send(client_fd, resp.c_str(), resp.size(), 0);
+                    }
                 }
             }
             else if (command == "PUBLISH" && request.elements.size() >= 3) {
