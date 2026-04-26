@@ -537,6 +537,76 @@ void handle_zrank(int fd, const RespValue& request) {
     send(fd, "$-1\r\n", 5, 0);
 }
 
+void handle_zrange(int fd, const RespValue& request) {
+    // ZRANGE key start stop
+    if (request.elements.size() < 4) {
+        const char* err = "-ERR wrong number of arguments for 'zrange' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    long long start = 0;
+    long long stop = 0;
+    try {
+        start = std::stoll(request.elements[2].bulkString);
+        stop = std::stoll(request.elements[3].bulkString);
+    } catch (...) {
+        const char* err = "-ERR value is not an integer or out of range\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const std::string& key = request.elements[1].bulkString;
+    std::lock_guard<std::mutex> lock(store_mutex);
+    auto it = key_value_store.find(key);
+    if (it == key_value_store.end()) {
+        send(fd, "*0\r\n", 4, 0);
+        return;
+    }
+    if (it->second.type != KeyType::ZSet) {
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    auto& zset = std::get<std::unordered_map<std::string, double>>(it->second.value);
+    std::vector<std::pair<std::string, double>> entries;
+    entries.reserve(zset.size());
+    for (const auto& kv : zset) {
+        entries.push_back(kv);
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.second != b.second) return a.second < b.second;
+                  return a.first < b.first;
+              });
+
+    const long long size = static_cast<long long>(entries.size());
+    if (size == 0) {
+        send(fd, "*0\r\n", 4, 0);
+        return;
+    }
+
+    // Redis-style negative index support.
+    if (start < 0) start = size + start;
+    if (stop < 0) stop = size + stop;
+    if (start < 0) start = 0;
+    if (stop >= size) stop = size - 1;
+
+    if (start >= size || start > stop) {
+        send(fd, "*0\r\n", 4, 0);
+        return;
+    }
+
+    const long long count = stop - start + 1;
+    std::string resp = "*" + std::to_string(count) + "\r\n";
+    for (long long i = start; i <= stop; ++i) {
+        const std::string& member = entries[static_cast<std::size_t>(i)].first;
+        resp += "$" + std::to_string(member.size()) + "\r\n" + member + "\r\n";
+    }
+    send(fd, resp.c_str(), resp.size(), 0);
+}
+
 // --- RPUSH ---
 void handle_rpush(int fd, const RespValue& request) {
     if (request.elements.size() < 3) {
@@ -1042,6 +1112,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"INCR",     handle_incr},
     {"ZADD",     handle_zadd},
     {"ZRANK",    handle_zrank},
+    {"ZRANGE",   handle_zrange},
 
     // Lists
     {"RPUSH",    handle_rpush},
