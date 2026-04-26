@@ -28,6 +28,10 @@ extern std::condition_variable expiry_cv;
 extern bool server_is_replica;
 extern std::string server_rdb_dir;
 extern std::string server_rdb_dbfilename;
+extern std::string server_appendonly;
+extern std::string server_appenddirname;
+extern std::string server_appendfilename;
+extern std::string server_appendfsync;
 
 namespace {
 
@@ -1098,6 +1102,14 @@ void handle_config(int fd, const RespValue& request) {
         value = server_rdb_dir;
     } else if (lower == "dbfilename") {
         value = server_rdb_dbfilename;
+    } else if (lower == "appendonly") {
+        value = server_appendonly;
+    } else if (lower == "appenddirname") {
+        value = server_appenddirname;
+    } else if (lower == "appendfilename") {
+        value = server_appendfilename;
+    } else if (lower == "appendfsync") {
+        value = server_appendfsync;
     } else {
         send(fd, "*0\r\n", 4, 0);
         return;

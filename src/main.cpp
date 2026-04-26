@@ -40,6 +40,10 @@ std::unordered_map<std::string, std::unordered_set<int>> pubsub_channel_subscrib
 bool server_is_replica = false;
 std::string server_rdb_dir = ".";
 std::string server_rdb_dbfilename = "dump.rdb";
+std::string server_appendonly = "no";
+std::string server_appenddirname = "appendonlydir";
+std::string server_appendfilename = "appendonly.aof";
+std::string server_appendfsync = "everysec";
 
 // Upstream TCP connection to master (replica mode); kept open after PING for later REPLCONF/PSYNC.
 std::atomic<int> g_replica_master_sock{-1};
@@ -1000,6 +1004,11 @@ int main(int argc, char* argv[]) {
     int port = 6379;
     std::string replica_master_host;
     int replica_master_port = 0;
+
+    char cwd_buf[4096];
+    if (getcwd(cwd_buf, sizeof(cwd_buf)) != nullptr) {
+        server_rdb_dir = cwd_buf;
+    }
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--port") == 0) {
