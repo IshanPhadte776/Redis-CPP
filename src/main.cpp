@@ -33,6 +33,8 @@ std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEn
 
 // Set by --replicaof; INFO replication reports role:slave when true.
 bool server_is_replica = false;
+std::string server_rdb_dir = ".";
+std::string server_rdb_dbfilename = "dump.rdb";
 
 // Upstream TCP connection to master (replica mode); kept open after PING for later REPLCONF/PSYNC.
 std::atomic<int> g_replica_master_sock{-1};
@@ -424,6 +426,9 @@ void handle_client(int client_fd) {
             else if (command == "ECHO" && request.elements.size() > 1) {
                 execute_command(client_fd, request);
             }
+            else if (command == "CONFIG" && request.elements.size() >= 3) {
+                execute_command(client_fd, request);
+            }
             else if (command == "WAIT" && request.elements.size() >= 3) {
                 execute_command(client_fd, request);
             } 
@@ -646,6 +651,20 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             port = static_cast<int>(parsed);
+            ++i;
+        } else if (std::strcmp(argv[i], "--dir") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --dir requires a value\n";
+                return 1;
+            }
+            server_rdb_dir = argv[i + 1];
+            ++i;
+        } else if (std::strcmp(argv[i], "--dbfilename") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --dbfilename requires a value\n";
+                return 1;
+            }
+            server_rdb_dbfilename = argv[i + 1];
             ++i;
         } else if (std::strcmp(argv[i], "--replicaof") == 0) {
             if (i + 1 >= argc) {

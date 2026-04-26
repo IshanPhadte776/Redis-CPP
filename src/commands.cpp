@@ -23,6 +23,8 @@ extern std::uint64_t global_flush_epoch;
 extern std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEntry>> expiry_heap;
 extern std::condition_variable expiry_cv;
 extern bool server_is_replica;
+extern std::string server_rdb_dir;
+extern std::string server_rdb_dbfilename;
 
 namespace {
 
@@ -684,6 +686,41 @@ void handle_info(int fd, const RespValue& request) {
     send(fd, out.c_str(), out.length(), 0);
 }
 
+void handle_config(int fd, const RespValue& request) {
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'config' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    std::string sub = request.elements[1].bulkString;
+    std::transform(sub.begin(), sub.end(), sub.begin(), ::toupper);
+    if (sub != "GET") {
+        const char* err = "-ERR unsupported CONFIG subcommand\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    std::string key = request.elements[2].bulkString;
+    std::string lower = key;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+    std::string value;
+    if (lower == "dir") {
+        value = server_rdb_dir;
+    } else if (lower == "dbfilename") {
+        value = server_rdb_dbfilename;
+    } else {
+        send(fd, "*0\r\n", 4, 0);
+        return;
+    }
+
+    std::string resp = "*2\r\n";
+    resp += "$" + std::to_string(lower.size()) + "\r\n" + lower + "\r\n";
+    resp += "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
+    send(fd, resp.c_str(), resp.size(), 0);
+}
+
 void handle_watch(int fd, const RespValue& request,
                   std::unordered_map<std::string, std::uint64_t>& watch_versions,
                   std::uint64_t& watch_flush_epoch) {
@@ -878,7 +915,8 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
 
     // // Metadata
     {"TYPE",     handle_type},
-    {"INFO",     handle_info}
+    {"INFO",     handle_info},
+    {"CONFIG",   handle_config}
 };
 
 
