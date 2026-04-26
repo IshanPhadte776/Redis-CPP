@@ -485,6 +485,58 @@ void handle_zadd(int fd, const RespValue& request) {
     send(fd, resp.c_str(), resp.size(), 0);
 }
 
+void handle_zrank(int fd, const RespValue& request) {
+    // ZRANK key member
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'zrank' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const std::string& key = request.elements[1].bulkString;
+    const std::string& member = request.elements[2].bulkString;
+    std::lock_guard<std::mutex> lock(store_mutex);
+
+    auto it = key_value_store.find(key);
+    if (it == key_value_store.end()) {
+        send(fd, "$-1\r\n", 5, 0);
+        return;
+    }
+    if (it->second.type != KeyType::ZSet) {
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    auto& zset = std::get<std::unordered_map<std::string, double>>(it->second.value);
+    if (zset.find(member) == zset.end()) {
+        send(fd, "$-1\r\n", 5, 0);
+        return;
+    }
+
+    std::vector<std::pair<std::string, double>> entries;
+    entries.reserve(zset.size());
+    for (const auto& kv : zset) {
+        entries.push_back(kv);
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.second != b.second) return a.second < b.second;
+                  return a.first < b.first;
+              });
+
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i].first == member) {
+            const std::string resp = ":" + std::to_string(i) + "\r\n";
+            send(fd, resp.c_str(), resp.size(), 0);
+            return;
+        }
+    }
+
+    // Shouldn't happen due to earlier find(), but keep Redis-style behavior.
+    send(fd, "$-1\r\n", 5, 0);
+}
+
 // --- RPUSH ---
 void handle_rpush(int fd, const RespValue& request) {
     if (request.elements.size() < 3) {
@@ -989,6 +1041,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"GET",      handle_get},
     {"INCR",     handle_incr},
     {"ZADD",     handle_zadd},
+    {"ZRANK",    handle_zrank},
 
     // Lists
     {"RPUSH",    handle_rpush},
