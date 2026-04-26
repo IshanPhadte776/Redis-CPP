@@ -176,14 +176,6 @@ void replica_apply_master_stream(int master_fd, std::string initial_pending) {
     std::string pending = std::move(initial_pending);
     char buf[4096];
     while (true) {
-        const ssize_t n = recv(master_fd, buf, sizeof(buf), 0);
-        if (n <= 0) {
-            break;
-        }
-        pending.append(buf, static_cast<std::size_t>(n));
-        if (pending.size() > static_cast<std::size_t>(1) << 20) {
-            break;
-        }
         std::size_t consumed = 0;
         RespValue cmd;
         while (RespParser::try_parse_complete_array(pending, cmd, consumed)) {
@@ -202,6 +194,15 @@ void replica_apply_master_stream(int master_fd, std::string initial_pending) {
             }
             execute_command(g_resp_sink_fd, cmd);
             g_replica_repl_offset.fetch_add(wire_bytes, std::memory_order_relaxed);
+        }
+
+        const ssize_t n = recv(master_fd, buf, sizeof(buf), 0);
+        if (n <= 0) {
+            break;
+        }
+        pending.append(buf, static_cast<std::size_t>(n));
+        if (pending.size() > static_cast<std::size_t>(1) << 20) {
+            break;
         }
     }
     close(master_fd);
