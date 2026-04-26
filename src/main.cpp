@@ -561,6 +561,7 @@ void background_cleanup() {
 void handle_client(int client_fd) {
     char buffer[1024];
     bool in_transaction = false;
+    bool is_authenticated = acl_default_user_is_nopass();
     std::unordered_set<std::string> subscribed_channels;
     std::vector<RespValue> command_queue;
     std::unordered_map<std::string, std::uint64_t> watch_versions;
@@ -581,6 +582,12 @@ void handle_client(int client_fd) {
             std::string raw_command = request.elements[0].bulkString;
             std::string command = raw_command;
             for (auto &c : command) c = toupper(c);
+
+            if (!is_authenticated && command != "AUTH") {
+                const char* err = "-NOAUTH Authentication required.\r\n";
+                send(client_fd, err, strlen(err), 0);
+                continue;
+            }
 
             const bool in_subscribed_mode = !subscribed_channels.empty();
             const bool subscribed_mode_allowed =
@@ -637,6 +644,17 @@ void handle_client(int client_fd) {
                     send(client_fd, kSubscribedPong, sizeof(kSubscribedPong) - 1, 0);
                 } else {
                     execute_command(client_fd, request);
+                }
+            }
+            else if (command == "AUTH" && request.elements.size() >= 3) {
+                const std::string& username = request.elements[1].bulkString;
+                const std::string& password = request.elements[2].bulkString;
+                if (acl_credentials_match(username, password)) {
+                    is_authenticated = true;
+                    send(client_fd, "+OK\r\n", 5, 0);
+                } else {
+                    const char* err = "-WRONGPASS invalid username-password pair or user is disabled.\r\n";
+                    send(client_fd, err, strlen(err), 0);
                 }
             }
             else if (command == "SUBSCRIBE" && request.elements.size() >= 2) {

@@ -76,4 +76,8 @@ void execute_command(int client_fd, const RespValue& request);
 // Used by MULTI/EXEC: guarantees exactly one RESP reply per queued command (errors inline in the EXEC array).
 void execute_command_for_exec(int client_fd, const RespValue& request);
 
+// ACL helpers used by connection-level auth flow in main.cpp.
+bool acl_default_user_is_nopass();
+bool acl_credentials_match(const std::string& username, const std::string& password);
+
 #endif // COMMANDS_H

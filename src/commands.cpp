@@ -1453,6 +1453,22 @@ void replication_unregister_replica(int client_fd) {
     g_repl_ack_cv.notify_all();
 }
 
+bool acl_default_user_is_nopass() {
+    std::lock_guard<std::mutex> lock(g_acl_mutex);
+    return g_default_user_nopass;
+}
+
+bool acl_credentials_match(const std::string& username, const std::string& password) {
+    if (username != "default") {
+        return false;
+    }
+    const std::string digest = sha256_hex(password);
+    std::lock_guard<std::mutex> lock(g_acl_mutex);
+    return std::find(g_default_user_password_hashes.begin(),
+                     g_default_user_password_hashes.end(),
+                     digest) != g_default_user_password_hashes.end();
+}
+
 void execute_command(int client_fd, const RespValue& request) {
     if (request.elements.empty()) return;
 
