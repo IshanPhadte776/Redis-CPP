@@ -1041,6 +1041,22 @@ void handle_acl(int fd, const RespValue& request) {
         send(fd, "$7\r\ndefault\r\n", 13, 0);
         return;
     }
+    if (sub == "GETUSER") {
+        if (request.elements.size() < 3) {
+            const char* err = "-ERR wrong number of arguments for 'acl|getuser' command\r\n";
+            send(fd, err, strlen(err), 0);
+            return;
+        }
+        const std::string& user = request.elements[2].bulkString;
+        if (user != "default") {
+            send(fd, "$-1\r\n", 5, 0);
+            return;
+        }
+        // ["flags", []]
+        static constexpr char kAclGetUserDefault[] = "*2\r\n$5\r\nflags\r\n*0\r\n";
+        send(fd, kAclGetUserDefault, sizeof(kAclGetUserDefault) - 1, 0);
+        return;
+    }
 
     const char* err = "-ERR unsupported ACL subcommand\r\n";
     send(fd, err, strlen(err), 0);
