@@ -144,23 +144,14 @@ void handle_wait(int fd, const RespValue& request) {
         return;
     }
 
-    // Stage scope: when requested replicas is 0, reply immediately with 0.
-    long long num_replicas = 0;
-    try {
-        num_replicas = std::stoll(request.elements[1].bulkString);
-    } catch (...) {
-        const char* err = "-ERR value is not an integer or out of range\r\n";
-        send(fd, err, strlen(err), 0);
-        return;
+    std::size_t replica_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
+        replica_count = g_repl_targets.size();
     }
 
-    if (num_replicas <= 0) {
-        send(fd, ":0\r\n", 4, 0);
-        return;
-    }
-
-    // Later stages will wait for acknowledgements; for now return 0 in minimal mode.
-    send(fd, ":0\r\n", 4, 0);
+    const std::string resp = ":" + std::to_string(replica_count) + "\r\n";
+    send(fd, resp.c_str(), resp.size(), 0);
 }
 
 void handle_echo(int fd, const RespValue& request) {
