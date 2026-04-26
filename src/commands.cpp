@@ -607,6 +607,32 @@ void handle_zrange(int fd, const RespValue& request) {
     send(fd, resp.c_str(), resp.size(), 0);
 }
 
+void handle_zcard(int fd, const RespValue& request) {
+    // ZCARD key
+    if (request.elements.size() < 2) {
+        const char* err = "-ERR wrong number of arguments for 'zcard' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const std::string& key = request.elements[1].bulkString;
+    std::lock_guard<std::mutex> lock(store_mutex);
+    auto it = key_value_store.find(key);
+    if (it == key_value_store.end()) {
+        send(fd, ":0\r\n", 4, 0);
+        return;
+    }
+    if (it->second.type != KeyType::ZSet) {
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const auto& zset = std::get<std::unordered_map<std::string, double>>(it->second.value);
+    const std::string resp = ":" + std::to_string(zset.size()) + "\r\n";
+    send(fd, resp.c_str(), resp.size(), 0);
+}
+
 // --- RPUSH ---
 void handle_rpush(int fd, const RespValue& request) {
     if (request.elements.size() < 3) {
@@ -1113,6 +1139,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"ZADD",     handle_zadd},
     {"ZRANK",    handle_zrank},
     {"ZRANGE",   handle_zrange},
+    {"ZCARD",    handle_zcard},
 
     // Lists
     {"RPUSH",    handle_rpush},
