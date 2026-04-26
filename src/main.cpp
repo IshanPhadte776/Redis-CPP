@@ -743,6 +743,9 @@ void handle_client(int client_fd) {
             else if (command == "CONFIG" && request.elements.size() >= 3) {
                 execute_command(client_fd, request);
             }
+            else if (command == "ACL" && request.elements.size() >= 2) {
+                execute_command(client_fd, request);
+            }
             else if (command == "WAIT" && request.elements.size() >= 3) {
                 execute_command(client_fd, request);
             } 

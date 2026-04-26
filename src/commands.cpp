@@ -1028,6 +1028,24 @@ void handle_config(int fd, const RespValue& request) {
     send(fd, resp.c_str(), resp.size(), 0);
 }
 
+void handle_acl(int fd, const RespValue& request) {
+    if (request.elements.size() < 2) {
+        const char* err = "-ERR wrong number of arguments for 'acl' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    std::string sub = request.elements[1].bulkString;
+    std::transform(sub.begin(), sub.end(), sub.begin(), ::toupper);
+    if (sub == "WHOAMI") {
+        send(fd, "$7\r\ndefault\r\n", 13, 0);
+        return;
+    }
+
+    const char* err = "-ERR unsupported ACL subcommand\r\n";
+    send(fd, err, strlen(err), 0);
+}
+
 void handle_watch(int fd, const RespValue& request,
                   std::unordered_map<std::string, std::uint64_t>& watch_versions,
                   std::uint64_t& watch_flush_epoch) {
@@ -1230,7 +1248,8 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     // // Metadata
     {"TYPE",     handle_type},
     {"INFO",     handle_info},
-    {"CONFIG",   handle_config}
+    {"CONFIG",   handle_config},
+    {"ACL",      handle_acl}
 };
 
 
