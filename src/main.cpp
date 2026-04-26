@@ -595,7 +595,11 @@ void handle_client(int client_fd) {
             }
 
             if (command == "PING") {
-                execute_command(client_fd, request);
+                if (in_subscribed_mode) {
+                    send(client_fd, "*2\r\n$4\r\npong\r\n$0\r\n\r\n", 22, 0);
+                } else {
+                    execute_command(client_fd, request);
+                }
             }
             else if (command == "SUBSCRIBE" && request.elements.size() >= 2) {
                 for (std::size_t i = 1; i < request.elements.size(); ++i) {
