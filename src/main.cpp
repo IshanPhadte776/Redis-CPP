@@ -32,6 +32,8 @@ std::uint64_t global_flush_epoch = 0;
 std::mutex store_mutex;
 std::condition_variable expiry_cv;
 std::priority_queue<ExpiryEntry, std::vector<ExpiryEntry>, std::greater<ExpiryEntry>> expiry_heap;
+std::mutex pubsub_mutex;
+std::unordered_map<std::string, std::size_t> pubsub_channel_subscriber_counts;
 
 // Set by --replicaof; INFO replication reports role:slave when true.
 bool server_is_replica = false;
@@ -605,7 +607,11 @@ void handle_client(int client_fd) {
             else if (command == "SUBSCRIBE" && request.elements.size() >= 2) {
                 for (std::size_t i = 1; i < request.elements.size(); ++i) {
                     const std::string& channel = request.elements[i].bulkString;
-                    subscribed_channels.insert(channel);
+                    const auto [_, inserted] = subscribed_channels.insert(channel);
+                    if (inserted) {
+                        std::lock_guard<std::mutex> lock(pubsub_mutex);
+                        pubsub_channel_subscriber_counts[channel]++;
+                    }
                     std::string resp = "*3\r\n";
                     resp += "$9\r\nsubscribe\r\n";
                     resp += "$" + std::to_string(channel.size()) + "\r\n" + channel + "\r\n";
@@ -613,11 +619,38 @@ void handle_client(int client_fd) {
                     send(client_fd, resp.c_str(), resp.size(), 0);
                 }
             }
+            else if (command == "PUBLISH" && request.elements.size() >= 3) {
+                const std::string& channel = request.elements[1].bulkString;
+                std::size_t subscribers = 0;
+                {
+                    std::lock_guard<std::mutex> lock(pubsub_mutex);
+                    auto it = pubsub_channel_subscriber_counts.find(channel);
+                    if (it != pubsub_channel_subscriber_counts.end()) {
+                        subscribers = it->second;
+                    }
+                }
+                const std::string resp = ":" + std::to_string(subscribers) + "\r\n";
+                send(client_fd, resp.c_str(), resp.size(), 0);
+            }
             else if (command == "QUIT") {
                 send(client_fd, "+OK\r\n", 5, 0);
                 break;
             }
             else if (command == "RESET") {
+                {
+                    std::lock_guard<std::mutex> lock(pubsub_mutex);
+                    for (const auto& channel : subscribed_channels) {
+                        auto it = pubsub_channel_subscriber_counts.find(channel);
+                        if (it != pubsub_channel_subscriber_counts.end()) {
+                            if (it->second > 0) {
+                                --it->second;
+                            }
+                            if (it->second == 0) {
+                                pubsub_channel_subscriber_counts.erase(it);
+                            }
+                        }
+                    }
+                }
                 subscribed_channels.clear();
                 send(client_fd, "+RESET\r\n", 8, 0);
             }
@@ -829,6 +862,20 @@ void handle_client(int client_fd) {
         }
 
       }
+    }
+    {
+        std::lock_guard<std::mutex> lock(pubsub_mutex);
+        for (const auto& channel : subscribed_channels) {
+            auto it = pubsub_channel_subscriber_counts.find(channel);
+            if (it != pubsub_channel_subscriber_counts.end()) {
+                if (it->second > 0) {
+                    --it->second;
+                }
+                if (it->second == 0) {
+                    pubsub_channel_subscriber_counts.erase(it);
+                }
+            }
+        }
     }
     replication_unregister_replica(client_fd);
     close(client_fd);
