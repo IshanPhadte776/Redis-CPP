@@ -422,6 +422,9 @@ void handle_client(int client_fd) {
             }
             else if (command == "ECHO" && request.elements.size() > 1) {
                 execute_command(client_fd, request);
+            }
+            else if (command == "WAIT" && request.elements.size() >= 3) {
+                execute_command(client_fd, request);
             } 
 
             else if (command == "FLUSHALL") {

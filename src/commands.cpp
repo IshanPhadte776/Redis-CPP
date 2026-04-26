@@ -137,6 +137,32 @@ void handle_psync(int fd, const RespValue& request) {
     replication_register_replica(fd);
 }
 
+void handle_wait(int fd, const RespValue& request) {
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'wait' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    // Stage scope: when requested replicas is 0, reply immediately with 0.
+    long long num_replicas = 0;
+    try {
+        num_replicas = std::stoll(request.elements[1].bulkString);
+    } catch (...) {
+        const char* err = "-ERR value is not an integer or out of range\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    if (num_replicas <= 0) {
+        send(fd, ":0\r\n", 4, 0);
+        return;
+    }
+
+    // Later stages will wait for acknowledgements; for now return 0 in minimal mode.
+    send(fd, ":0\r\n", 4, 0);
+}
+
 void handle_echo(int fd, const RespValue& request) {
     if (request.elements.size() < 2) {
         send(fd, "-ERR wrong number of arguments for 'echo' command\r\n", 50, 0);
@@ -760,6 +786,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"REPLCONF", handle_replconf},
     {"PSYNC",    handle_psync},
     {"ECHO",     handle_echo},
+    {"WAIT",     handle_wait},
     {"FLUSHALL", handle_flushall},
 
     // Strings & Numbers
