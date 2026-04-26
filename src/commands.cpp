@@ -11,6 +11,8 @@
 #include <queue>
 #include <cstring>
 #include <stdexcept>
+#include <sstream>
+#include <iomanip>
 #include "commands.h"
 #include "respparser.h" // Wherever your RespValue struct is
 #include "dataStructures.h" // Wherever your Node struct and key_value_store are
@@ -633,6 +635,42 @@ void handle_zcard(int fd, const RespValue& request) {
     send(fd, resp.c_str(), resp.size(), 0);
 }
 
+void handle_zscore(int fd, const RespValue& request) {
+    // ZSCORE key member
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'zscore' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const std::string& key = request.elements[1].bulkString;
+    const std::string& member = request.elements[2].bulkString;
+    std::lock_guard<std::mutex> lock(store_mutex);
+    auto it = key_value_store.find(key);
+    if (it == key_value_store.end()) {
+        send(fd, "$-1\r\n", 5, 0);
+        return;
+    }
+    if (it->second.type != KeyType::ZSet) {
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const auto& zset = std::get<std::unordered_map<std::string, double>>(it->second.value);
+    auto mit = zset.find(member);
+    if (mit == zset.end()) {
+        send(fd, "$-1\r\n", 5, 0);
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << std::setprecision(17) << mit->second;
+    const std::string score = oss.str();
+    const std::string resp = "$" + std::to_string(score.size()) + "\r\n" + score + "\r\n";
+    send(fd, resp.c_str(), resp.size(), 0);
+}
+
 // --- RPUSH ---
 void handle_rpush(int fd, const RespValue& request) {
     if (request.elements.size() < 3) {
@@ -1140,6 +1178,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"ZRANK",    handle_zrank},
     {"ZRANGE",   handle_zrange},
     {"ZCARD",    handle_zcard},
+    {"ZSCORE",   handle_zscore},
 
     // Lists
     {"RPUSH",    handle_rpush},

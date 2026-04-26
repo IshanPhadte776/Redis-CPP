@@ -768,6 +768,9 @@ void handle_client(int client_fd) {
             else if (command == "ZCARD" && request.elements.size() >= 2) {
                 execute_command(client_fd, request);
             }
+            else if (command == "ZSCORE" && request.elements.size() >= 3) {
+                execute_command(client_fd, request);
+            }
             else if (command == "KEYS" && request.elements.size() >= 2) {
                 execute_command(client_fd, request);
             }
