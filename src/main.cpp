@@ -541,8 +541,24 @@ void handle_client(int client_fd) {
         std::cout << "[DEBUG] Parsed command: " << (request.elements.empty() ? "None" : request.elements[0].bulkString) << std::endl;
 
         if (request.type == RespType::Array && !request.elements.empty()) {
-            std::string command = request.elements[0].bulkString;
+            std::string raw_command = request.elements[0].bulkString;
+            std::string command = raw_command;
             for (auto &c : command) c = toupper(c);
+
+            const bool in_subscribed_mode = !subscribed_channels.empty();
+            const bool subscribed_mode_allowed =
+                command == "SUBSCRIBE" || command == "UNSUBSCRIBE" ||
+                command == "PSUBSCRIBE" || command == "PUNSUBSCRIBE" ||
+                command == "PING" || command == "QUIT" || command == "RESET";
+
+            if (in_subscribed_mode && !subscribed_mode_allowed) {
+                std::string lower = raw_command;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                std::string err = "-ERR Can't execute '" + lower +
+                    "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n";
+                send(client_fd, err.c_str(), err.size(), 0);
+                continue;
+            }
 
             if (in_transaction) {
                 if (command == "MULTI") {
@@ -591,6 +607,14 @@ void handle_client(int client_fd) {
                     resp += ":" + std::to_string(subscribed_channels.size()) + "\r\n";
                     send(client_fd, resp.c_str(), resp.size(), 0);
                 }
+            }
+            else if (command == "QUIT") {
+                send(client_fd, "+OK\r\n", 5, 0);
+                break;
+            }
+            else if (command == "RESET") {
+                subscribed_channels.clear();
+                send(client_fd, "+RESET\r\n", 8, 0);
             }
             else if (command == "REPLCONF") {
                 execute_command(client_fd, request);
