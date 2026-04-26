@@ -596,7 +596,8 @@ void handle_client(int client_fd) {
 
             if (command == "PING") {
                 if (in_subscribed_mode) {
-                    send(client_fd, "*2\r\n$4\r\npong\r\n$0\r\n\r\n", 22, 0);
+                    static constexpr char kSubscribedPong[] = "*2\r\n$4\r\npong\r\n$0\r\n\r\n";
+                    send(client_fd, kSubscribedPong, sizeof(kSubscribedPong) - 1, 0);
                 } else {
                     execute_command(client_fd, request);
                 }
