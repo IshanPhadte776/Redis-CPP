@@ -24,6 +24,7 @@ void handle_set(int fd, const RespValue& req);
 void handle_get(int fd, const RespValue& req);
 void handle_incr(int fd, const RespValue& req);
 void handle_zadd(int fd, const RespValue& req);
+void handle_zrem(int fd, const RespValue& req);
 void handle_zrank(int fd, const RespValue& req);
 void handle_zrange(int fd, const RespValue& req);
 void handle_zcard(int fd, const RespValue& req);

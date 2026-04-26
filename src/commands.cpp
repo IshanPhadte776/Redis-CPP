@@ -65,7 +65,8 @@ std::uint64_t g_last_wait_offset = 0;
 bool command_propagates_to_replicas(const std::string& cmd_upper) {
     return cmd_upper == "SET" || cmd_upper == "FLUSHALL" || cmd_upper == "INCR"
         || cmd_upper == "RPUSH" || cmd_upper == "LPUSH" || cmd_upper == "LPOP"
-        || cmd_upper == "BLPOP" || cmd_upper == "XADD" || cmd_upper == "ZADD";
+        || cmd_upper == "BLPOP" || cmd_upper == "XADD" || cmd_upper == "ZADD"
+        || cmd_upper == "ZREM";
 }
 
 std::size_t count_acked_replicas_locked(std::uint64_t target_offset) {
@@ -484,6 +485,38 @@ void handle_zadd(int fd, const RespValue& request) {
 
     store_bump_key_revision(key);
     const std::string resp = ":" + std::to_string(added) + "\r\n";
+    send(fd, resp.c_str(), resp.size(), 0);
+}
+
+void handle_zrem(int fd, const RespValue& request) {
+    // ZREM key member
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'zrem' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const std::string& key = request.elements[1].bulkString;
+    const std::string& member = request.elements[2].bulkString;
+    std::lock_guard<std::mutex> lock(store_mutex);
+
+    auto it = key_value_store.find(key);
+    if (it == key_value_store.end()) {
+        send(fd, ":0\r\n", 4, 0);
+        return;
+    }
+    if (it->second.type != KeyType::ZSet) {
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    auto& zset = std::get<std::unordered_map<std::string, double>>(it->second.value);
+    const std::size_t removed = zset.erase(member);
+    if (removed > 0) {
+        store_bump_key_revision(key);
+    }
+    const std::string resp = ":" + std::to_string(removed) + "\r\n";
     send(fd, resp.c_str(), resp.size(), 0);
 }
 
@@ -1175,6 +1208,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"GET",      handle_get},
     {"INCR",     handle_incr},
     {"ZADD",     handle_zadd},
+    {"ZREM",     handle_zrem},
     {"ZRANK",    handle_zrank},
     {"ZRANGE",   handle_zrange},
     {"ZCARD",    handle_zcard},
