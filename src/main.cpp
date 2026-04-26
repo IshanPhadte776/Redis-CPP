@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <atomic>
+#include <fstream>
 #include "respparser.h"
 #include "dataStructures.h"
 #include "commands.h"
@@ -315,6 +316,167 @@ void replica_connect_and_send_ping(std::string master_host, int master_port, int
     std::thread(replica_apply_master_stream, fd, std::move(pending)).detach();
 }
 
+
+
+bool rdb_read_length(const std::vector<unsigned char>& data, std::size_t& idx, std::uint64_t& out_len, unsigned char& enc_type) {
+    if (idx >= data.size()) return false;
+    unsigned char first = data[idx++];
+    unsigned char top2 = static_cast<unsigned char>(first >> 6);
+    if (top2 == 0) {
+        out_len = first & 0x3F;
+        enc_type = 0;
+        return true;
+    }
+    if (top2 == 1) {
+        if (idx >= data.size()) return false;
+        out_len = (static_cast<std::uint64_t>(first & 0x3F) << 8) | data[idx++];
+        enc_type = 0;
+        return true;
+    }
+    if (top2 == 2) {
+        if (idx + 4 > data.size()) return false;
+        out_len = (static_cast<std::uint64_t>(data[idx]) << 24)
+                | (static_cast<std::uint64_t>(data[idx + 1]) << 16)
+                | (static_cast<std::uint64_t>(data[idx + 2]) << 8)
+                | static_cast<std::uint64_t>(data[idx + 3]);
+        idx += 4;
+        enc_type = 0;
+        return true;
+    }
+    out_len = first & 0x3F;
+    enc_type = 1;
+    return true;
+}
+
+bool rdb_read_string(const std::vector<unsigned char>& data, std::size_t& idx, std::string& out) {
+    std::uint64_t len = 0;
+    unsigned char enc = 0;
+    if (!rdb_read_length(data, idx, len, enc)) return false;
+    if (enc == 0) {
+        if (idx + len > data.size()) return false;
+        out.assign(reinterpret_cast<const char*>(&data[idx]), static_cast<std::size_t>(len));
+        idx += static_cast<std::size_t>(len);
+        return true;
+    }
+
+    // Integer encoded strings (C0/C1/C2).
+    if (len == 0) {
+        if (idx >= data.size()) return false;
+        std::int64_t v = static_cast<std::int8_t>(data[idx++]);
+        out = std::to_string(v);
+        return true;
+    }
+    if (len == 1) {
+        if (idx + 2 > data.size()) return false;
+        std::int16_t v = static_cast<std::int16_t>(data[idx] | (data[idx + 1] << 8));
+        idx += 2;
+        out = std::to_string(v);
+        return true;
+    }
+    if (len == 2) {
+        if (idx + 4 > data.size()) return false;
+        std::int32_t v = static_cast<std::int32_t>(data[idx]
+            | (data[idx + 1] << 8)
+            | (data[idx + 2] << 16)
+            | (data[idx + 3] << 24));
+        idx += 4;
+        out = std::to_string(v);
+        return true;
+    }
+
+    // LZF or unsupported string encoding; not needed in current stages.
+    return false;
+}
+
+bool rdb_load_from_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+
+    std::vector<unsigned char> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (data.size() < 9) return false;
+    if (std::string(reinterpret_cast<const char*>(data.data()), 5) != "REDIS") return false;
+
+    std::size_t idx = 9; // REDIS000x header
+    const auto now_sys = std::chrono::system_clock::now();
+    const auto now_sys_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_sys.time_since_epoch()).count();
+
+    while (idx < data.size()) {
+        unsigned char op = data[idx++];
+
+        if (op == 0xFF) {
+            break;
+        }
+        if (op == 0xFA) {
+            std::string k, v;
+            if (!rdb_read_string(data, idx, k) || !rdb_read_string(data, idx, v)) return false;
+            continue;
+        }
+        if (op == 0xFE) {
+            std::uint64_t tmp = 0; unsigned char enc = 0;
+            if (!rdb_read_length(data, idx, tmp, enc)) return false;
+            continue;
+        }
+        if (op == 0xFB) {
+            std::uint64_t a = 0, b = 0; unsigned char enc = 0;
+            if (!rdb_read_length(data, idx, a, enc)) return false;
+            if (!rdb_read_length(data, idx, b, enc)) return false;
+            continue;
+        }
+
+        bool has_expiry = false;
+        std::int64_t expiry_ms = 0;
+        if (op == 0xFC) {
+            if (idx + 8 > data.size()) return false;
+            std::uint64_t raw = 0;
+            for (int i = 0; i < 8; ++i) raw |= (static_cast<std::uint64_t>(data[idx + i]) << (8 * i));
+            idx += 8;
+            has_expiry = true;
+            expiry_ms = static_cast<std::int64_t>(raw);
+            if (idx >= data.size()) return false;
+            op = data[idx++];
+        } else if (op == 0xFD) {
+            if (idx + 4 > data.size()) return false;
+            std::uint32_t raw = static_cast<std::uint32_t>(data[idx])
+                | (static_cast<std::uint32_t>(data[idx + 1]) << 8)
+                | (static_cast<std::uint32_t>(data[idx + 2]) << 16)
+                | (static_cast<std::uint32_t>(data[idx + 3]) << 24);
+            idx += 4;
+            has_expiry = true;
+            expiry_ms = static_cast<std::int64_t>(raw) * 1000;
+            if (idx >= data.size()) return false;
+            op = data[idx++];
+        }
+
+        // Only string values are needed for this stage.
+        if (op != 0x00) {
+            return true;
+        }
+
+        std::string key, val;
+        if (!rdb_read_string(data, idx, key)) return false;
+        if (!rdb_read_string(data, idx, val)) return false;
+
+        if (has_expiry && expiry_ms <= now_sys_ms) {
+            continue;
+        }
+
+        Node n;
+        n.type = KeyType::String;
+        n.value = val;
+        n.hasTTL = false;
+        if (has_expiry) {
+            const auto delta_ms = expiry_ms - now_sys_ms;
+            if (delta_ms > 0) {
+                n.hasTTL = true;
+                n.expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(delta_ms);
+            }
+        }
+        key_value_store[key] = std::move(n);
+    }
+
+    return true;
+}
+
 } // namespace
 
 // ==========================================
@@ -440,6 +602,9 @@ void handle_client(int client_fd) {
                 execute_command(client_fd, request);
             }
             else if (command == "GET" && request.elements.size() >= 2) {
+                execute_command(client_fd, request);
+            }
+            else if (command == "KEYS" && request.elements.size() >= 2) {
                 execute_command(client_fd, request);
             }
             else if (command == "RPUSH" && request.elements.size() >= 3) {
@@ -718,6 +883,11 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << std::unitbuf;
+
+    {
+        std::lock_guard<std::mutex> lock(store_mutex);
+        (void)rdb_load_from_file(server_rdb_dir + "/" + server_rdb_dbfilename);
+    }
 
     g_resp_sink_fd = open("/dev/null", O_WRONLY);
     if (g_resp_sink_fd < 0) {

@@ -244,6 +244,37 @@ void handle_echo(int fd, const RespValue& request) {
     send(fd, resp.c_str(), resp.length(), 0);
 }
 
+void handle_keys(int fd, const RespValue& request) {
+    if (request.elements.size() < 2) {
+        const char* err = "-ERR wrong number of arguments for 'keys' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    // Stage scope: tester uses KEYS "*" only.
+    if (request.elements[1].bulkString != "*") {
+        send(fd, "*0\r\n", 4, 0);
+        return;
+    }
+
+    std::vector<std::string> keys;
+    {
+        std::lock_guard<std::mutex> lock(store_mutex);
+        keys.reserve(key_value_store.size());
+        for (const auto& kv : key_value_store) {
+            if (kv.second.type != KeyType::None) {
+                keys.push_back(kv.first);
+            }
+        }
+    }
+
+    std::string resp = "*" + std::to_string(keys.size()) + "\r\n";
+    for (const auto& key : keys) {
+        resp += "$" + std::to_string(key.size()) + "\r\n" + key + "\r\n";
+    }
+    send(fd, resp.c_str(), resp.size(), 0);
+}
+
 void handle_flushall(int fd, const RespValue& request) {
     std::lock_guard<std::mutex> lock(store_mutex);
     store_note_database_flush();
@@ -893,6 +924,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"PSYNC",    handle_psync},
     {"ECHO",     handle_echo},
     {"WAIT",     handle_wait},
+    {"KEYS",     handle_keys},
     {"FLUSHALL", handle_flushall},
 
     // Strings & Numbers

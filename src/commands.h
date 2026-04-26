@@ -17,6 +17,7 @@ void handle_psync(int fd, const RespValue& req);
 void handle_echo(int fd, const RespValue& req);
 void handle_wait(int fd, const RespValue& req);
 void handle_flushall(int fd, const RespValue& req);
+void handle_keys(int fd, const RespValue& req);
 
 // String Commands
 void handle_set(int fd, const RespValue& req);
