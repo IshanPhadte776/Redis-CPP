@@ -63,7 +63,7 @@ std::uint64_t g_last_wait_offset = 0;
 bool command_propagates_to_replicas(const std::string& cmd_upper) {
     return cmd_upper == "SET" || cmd_upper == "FLUSHALL" || cmd_upper == "INCR"
         || cmd_upper == "RPUSH" || cmd_upper == "LPUSH" || cmd_upper == "LPOP"
-        || cmd_upper == "BLPOP" || cmd_upper == "XADD";
+        || cmd_upper == "BLPOP" || cmd_upper == "XADD" || cmd_upper == "ZADD";
 }
 
 std::size_t count_acked_replicas_locked(std::uint64_t target_offset) {
@@ -426,6 +426,63 @@ void handle_incr(int fd, const RespValue& request) {
             }
         }
     }
+}
+
+void handle_zadd(int fd, const RespValue& request) {
+    // ZADD key score member [score member ...]
+    if (request.elements.size() < 4 || (request.elements.size() % 2) != 0) {
+        const char* err = "-ERR wrong number of arguments for 'zadd' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const std::string key = request.elements[1].bulkString;
+    std::lock_guard<std::mutex> lock(store_mutex);
+    Node& node = key_value_store[key];
+
+    if (node.type == KeyType::None) {
+        node.type = KeyType::ZSet;
+        node.value = std::unordered_map<std::string, double>{};
+    } else if (node.type != KeyType::ZSet) {
+        const char* err = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    auto& zset = std::get<std::unordered_map<std::string, double>>(node.value);
+    std::uint64_t added = 0;
+
+    for (std::size_t i = 2; i + 1 < request.elements.size(); i += 2) {
+        const std::string& score_s = request.elements[i].bulkString;
+        const std::string& member = request.elements[i + 1].bulkString;
+
+        size_t parsed = 0;
+        double score = 0.0;
+        try {
+            score = std::stod(score_s, &parsed);
+        } catch (...) {
+            const char* err = "-ERR value is not a valid float\r\n";
+            send(fd, err, strlen(err), 0);
+            return;
+        }
+        if (parsed != score_s.size()) {
+            const char* err = "-ERR value is not a valid float\r\n";
+            send(fd, err, strlen(err), 0);
+            return;
+        }
+
+        auto it = zset.find(member);
+        if (it == zset.end()) {
+            zset[member] = score;
+            ++added;
+        } else {
+            it->second = score;
+        }
+    }
+
+    store_bump_key_revision(key);
+    const std::string resp = ":" + std::to_string(added) + "\r\n";
+    send(fd, resp.c_str(), resp.size(), 0);
 }
 
 // --- RPUSH ---
@@ -931,6 +988,7 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"SET",      handle_set},
     {"GET",      handle_get},
     {"INCR",     handle_incr},
+    {"ZADD",     handle_zadd},
 
     // Lists
     {"RPUSH",    handle_rpush},

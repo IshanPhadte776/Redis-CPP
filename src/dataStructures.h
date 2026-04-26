@@ -90,6 +90,7 @@ struct StreamEntry {
 using RedisValue = std::variant<
     std::string,                    // For SET
     std::vector<std::string>,       // For LIST (LPUSH/RPUSH)
+    std::unordered_map<std::string, double>, // For ZSET (ZADD)
     std::vector<StreamEntry>        // For STREAM (XADD)
 >;
 

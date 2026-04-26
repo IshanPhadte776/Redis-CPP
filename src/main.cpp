@@ -756,6 +756,9 @@ void handle_client(int client_fd) {
             else if (command == "GET" && request.elements.size() >= 2) {
                 execute_command(client_fd, request);
             }
+            else if (command == "ZADD" && request.elements.size() >= 4) {
+                execute_command(client_fd, request);
+            }
             else if (command == "KEYS" && request.elements.size() >= 2) {
                 execute_command(client_fd, request);
             }
