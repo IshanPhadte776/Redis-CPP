@@ -1024,6 +1024,34 @@ int main(int argc, char* argv[]) {
             }
             port = static_cast<int>(parsed);
             ++i;
+        } else if (std::strcmp(argv[i], "--appendonly") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --appendonly requires a value\n";
+                return 1;
+            }
+            server_appendonly = argv[i + 1];
+            ++i;
+        } else if (std::strcmp(argv[i], "--appenddirname") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --appenddirname requires a value\n";
+                return 1;
+            }
+            server_appenddirname = argv[i + 1];
+            ++i;
+        } else if (std::strcmp(argv[i], "--appendfilename") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --appendfilename requires a value\n";
+                return 1;
+            }
+            server_appendfilename = argv[i + 1];
+            ++i;
+        } else if (std::strcmp(argv[i], "--appendfsync") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --appendfsync requires a value\n";
+                return 1;
+            }
+            server_appendfsync = argv[i + 1];
+            ++i;
         } else if (std::strcmp(argv[i], "--dir") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "error: --dir requires a value\n";
