@@ -1202,6 +1202,40 @@ void handle_acl(int fd, const RespValue& request) {
     send(fd, err, strlen(err), 0);
 }
 
+void handle_auth(int fd, const RespValue& request) {
+    // AUTH username password
+    if (request.elements.size() < 3) {
+        const char* err = "-ERR wrong number of arguments for 'auth' command\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const std::string& username = request.elements[1].bulkString;
+    const std::string& password = request.elements[2].bulkString;
+
+    if (username != "default") {
+        const char* err = "-WRONGPASS invalid username-password pair or user is disabled.\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
+    const std::string digest = sha256_hex(password);
+    bool matched = false;
+    {
+        std::lock_guard<std::mutex> lock(g_acl_mutex);
+        matched = std::find(g_default_user_password_hashes.begin(),
+                            g_default_user_password_hashes.end(),
+                            digest) != g_default_user_password_hashes.end();
+    }
+
+    if (matched) {
+        send(fd, "+OK\r\n", 5, 0);
+    } else {
+        const char* err = "-WRONGPASS invalid username-password pair or user is disabled.\r\n";
+        send(fd, err, strlen(err), 0);
+    }
+}
+
 void handle_watch(int fd, const RespValue& request,
                   std::unordered_map<std::string, std::uint64_t>& watch_versions,
                   std::uint64_t& watch_flush_epoch) {
@@ -1405,7 +1439,8 @@ std::unordered_map<std::string, std::function<void(int, const RespValue&)>> hand
     {"TYPE",     handle_type},
     {"INFO",     handle_info},
     {"CONFIG",   handle_config},
-    {"ACL",      handle_acl}
+    {"ACL",      handle_acl},
+    {"AUTH",     handle_auth}
 };
 
 

@@ -48,6 +48,7 @@ void handle_type(int fd, const RespValue& req);
 void handle_info(int fd, const RespValue& req);
 void handle_config(int fd, const RespValue& req);
 void handle_acl(int fd, const RespValue& req);
+void handle_auth(int fd, const RespValue& req);
 
 // Transactions (optimistic locking): per-client state lives in main's handle_client.
 void handle_watch(int fd, const RespValue& req,
