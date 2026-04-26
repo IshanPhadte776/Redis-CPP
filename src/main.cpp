@@ -7,6 +7,7 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cstdint>
 #include <queue>
@@ -523,6 +524,7 @@ void background_cleanup() {
 void handle_client(int client_fd) {
     char buffer[1024];
     bool in_transaction = false;
+    std::unordered_set<std::string> subscribed_channels;
     std::vector<RespValue> command_queue;
     std::unordered_map<std::string, std::uint64_t> watch_versions;
     std::uint64_t watch_flush_epoch = 0;
@@ -578,6 +580,17 @@ void handle_client(int client_fd) {
 
             if (command == "PING") {
                 execute_command(client_fd, request);
+            }
+            else if (command == "SUBSCRIBE" && request.elements.size() >= 2) {
+                for (std::size_t i = 1; i < request.elements.size(); ++i) {
+                    const std::string& channel = request.elements[i].bulkString;
+                    subscribed_channels.insert(channel);
+                    std::string resp = "*3\r\n";
+                    resp += "$9\r\nsubscribe\r\n";
+                    resp += "$" + std::to_string(channel.size()) + "\r\n" + channel + "\r\n";
+                    resp += ":" + std::to_string(subscribed_channels.size()) + "\r\n";
+                    send(client_fd, resp.c_str(), resp.size(), 0);
+                }
             }
             else if (command == "REPLCONF") {
                 execute_command(client_fd, request);
