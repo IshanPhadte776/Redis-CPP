@@ -1052,9 +1052,13 @@ void handle_acl(int fd, const RespValue& request) {
             send(fd, "$-1\r\n", 5, 0);
             return;
         }
-        // ["flags", ["nopass"]]
+        // ["flags", ["nopass"], "passwords", []]
         static constexpr char kAclGetUserDefault[] =
-            "*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n";
+            "*4\r\n"
+            "$5\r\nflags\r\n"
+            "*1\r\n$6\r\nnopass\r\n"
+            "$9\r\npasswords\r\n"
+            "*0\r\n";
         send(fd, kAclGetUserDefault, sizeof(kAclGetUserDefault) - 1, 0);
         return;
     }
