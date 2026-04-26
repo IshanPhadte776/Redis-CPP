@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <iomanip>
+#include <array>
 #include "commands.h"
 #include "respparser.h" // Wherever your RespValue struct is
 #include "dataStructures.h" // Wherever your Node struct and key_value_store are
@@ -61,6 +62,86 @@ std::vector<int> g_repl_targets;
 std::unordered_map<int, std::uint64_t> g_repl_ack_offsets;
 std::uint64_t g_master_repl_offset = 0;
 std::uint64_t g_last_wait_offset = 0;
+
+// ACL state for the built-in default user.
+std::mutex g_acl_mutex;
+bool g_default_user_nopass = true;
+std::vector<std::string> g_default_user_password_hashes;
+
+inline std::uint32_t rotr32(std::uint32_t x, int n) {
+    return (x >> n) | (x << (32 - n));
+}
+
+std::string sha256_hex(const std::string& input) {
+    static constexpr std::uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    };
+
+    std::uint64_t bit_len = static_cast<std::uint64_t>(input.size()) * 8ULL;
+    std::vector<unsigned char> msg(input.begin(), input.end());
+    msg.push_back(0x80);
+    while ((msg.size() % 64) != 56) {
+        msg.push_back(0x00);
+    }
+    for (int i = 7; i >= 0; --i) {
+        msg.push_back(static_cast<unsigned char>((bit_len >> (i * 8)) & 0xFF));
+    }
+
+    std::uint32_t h0 = 0x6a09e667;
+    std::uint32_t h1 = 0xbb67ae85;
+    std::uint32_t h2 = 0x3c6ef372;
+    std::uint32_t h3 = 0xa54ff53a;
+    std::uint32_t h4 = 0x510e527f;
+    std::uint32_t h5 = 0x9b05688c;
+    std::uint32_t h6 = 0x1f83d9ab;
+    std::uint32_t h7 = 0x5be0cd19;
+
+    for (std::size_t chunk = 0; chunk < msg.size(); chunk += 64) {
+        std::uint32_t w[64]{};
+        for (int i = 0; i < 16; ++i) {
+            std::size_t j = chunk + static_cast<std::size_t>(i) * 4;
+            w[i] = (static_cast<std::uint32_t>(msg[j]) << 24)
+                 | (static_cast<std::uint32_t>(msg[j + 1]) << 16)
+                 | (static_cast<std::uint32_t>(msg[j + 2]) << 8)
+                 | static_cast<std::uint32_t>(msg[j + 3]);
+        }
+        for (int i = 16; i < 64; ++i) {
+            std::uint32_t s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            std::uint32_t s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+
+        std::uint32_t a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+        for (int i = 0; i < 64; ++i) {
+            std::uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            std::uint32_t ch = (e & f) ^ ((~e) & g);
+            std::uint32_t temp1 = h + S1 + ch + k[i] + w[i];
+            std::uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            std::uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            std::uint32_t temp2 = S0 + maj;
+            h = g; g = f; f = e; e = d + temp1;
+            d = c; c = b; b = a; a = temp1 + temp2;
+        }
+
+        h0 += a; h1 += b; h2 += c; h3 += d;
+        h4 += e; h5 += f; h6 += g; h7 += h;
+    }
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0')
+        << std::setw(8) << h0 << std::setw(8) << h1
+        << std::setw(8) << h2 << std::setw(8) << h3
+        << std::setw(8) << h4 << std::setw(8) << h5
+        << std::setw(8) << h6 << std::setw(8) << h7;
+    return out.str();
+}
 
 bool command_propagates_to_replicas(const std::string& cmd_upper) {
     return cmd_upper == "SET" || cmd_upper == "FLUSHALL" || cmd_upper == "INCR"
@@ -1052,14 +1133,68 @@ void handle_acl(int fd, const RespValue& request) {
             send(fd, "$-1\r\n", 5, 0);
             return;
         }
-        // ["flags", ["nopass"], "passwords", []]
-        static constexpr char kAclGetUserDefault[] =
-            "*4\r\n"
-            "$5\r\nflags\r\n"
-            "*1\r\n$6\r\nnopass\r\n"
-            "$9\r\npasswords\r\n"
-            "*0\r\n";
-        send(fd, kAclGetUserDefault, sizeof(kAclGetUserDefault) - 1, 0);
+        bool nopass = true;
+        std::vector<std::string> passwords;
+        {
+            std::lock_guard<std::mutex> lock(g_acl_mutex);
+            nopass = g_default_user_nopass;
+            passwords = g_default_user_password_hashes;
+        }
+
+        std::string resp = "*4\r\n";
+        resp += "$5\r\nflags\r\n";
+        if (nopass) {
+            resp += "*1\r\n$6\r\nnopass\r\n";
+        } else {
+            resp += "*0\r\n";
+        }
+        resp += "$9\r\npasswords\r\n";
+        resp += "*" + std::to_string(passwords.size()) + "\r\n";
+        for (const auto& p : passwords) {
+            resp += "$" + std::to_string(p.size()) + "\r\n" + p + "\r\n";
+        }
+        send(fd, resp.c_str(), resp.size(), 0);
+        return;
+    }
+    if (sub == "SETUSER") {
+        if (request.elements.size() < 4) {
+            const char* err = "-ERR wrong number of arguments for 'acl|setuser' command\r\n";
+            send(fd, err, strlen(err), 0);
+            return;
+        }
+        const std::string& user = request.elements[2].bulkString;
+        if (user != "default") {
+            const char* err = "-ERR user does not exist\r\n";
+            send(fd, err, strlen(err), 0);
+            return;
+        }
+
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(g_acl_mutex);
+            for (std::size_t i = 3; i < request.elements.size(); ++i) {
+                const std::string& rule = request.elements[i].bulkString;
+                if (!rule.empty() && rule[0] == '>') {
+                    const std::string password = rule.substr(1);
+                    const std::string digest = sha256_hex(password);
+                    if (std::find(g_default_user_password_hashes.begin(),
+                                  g_default_user_password_hashes.end(),
+                                  digest) == g_default_user_password_hashes.end()) {
+                        g_default_user_password_hashes.push_back(digest);
+                    }
+                    changed = true;
+                }
+            }
+            if (changed) {
+                g_default_user_nopass = false;
+            }
+        }
+        if (!changed) {
+            const char* err = "-ERR unsupported ACL SETUSER rule\r\n";
+            send(fd, err, strlen(err), 0);
+            return;
+        }
+        send(fd, "+OK\r\n", 5, 0);
         return;
     }
 
