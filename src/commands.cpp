@@ -52,12 +52,27 @@ static constexpr std::uint8_t kEmptyRdb[] = {
 constexpr std::size_t kEmptyRdbLen = sizeof(kEmptyRdb);
 
 std::mutex g_repl_targets_mutex;
+std::condition_variable g_repl_ack_cv;
 std::vector<int> g_repl_targets;
+std::unordered_map<int, std::uint64_t> g_repl_ack_offsets;
+std::uint64_t g_master_repl_offset = 0;
+std::uint64_t g_last_wait_offset = 0;
 
 bool command_propagates_to_replicas(const std::string& cmd_upper) {
     return cmd_upper == "SET" || cmd_upper == "FLUSHALL" || cmd_upper == "INCR"
         || cmd_upper == "RPUSH" || cmd_upper == "LPUSH" || cmd_upper == "LPOP"
         || cmd_upper == "BLPOP" || cmd_upper == "XADD";
+}
+
+std::size_t count_acked_replicas_locked(std::uint64_t target_offset) {
+    std::size_t acked = 0;
+    for (int fd : g_repl_targets) {
+        auto it = g_repl_ack_offsets.find(fd);
+        if (it != g_repl_ack_offsets.end() && it->second >= target_offset) {
+            ++acked;
+        }
+    }
+    return acked;
 }
 
 void replication_register_replica(int fd) {
@@ -67,10 +82,12 @@ void replication_register_replica(int fd) {
     std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
     for (int existing : g_repl_targets) {
         if (existing == fd) {
+            g_repl_ack_offsets[fd] = g_master_repl_offset;
             return;
         }
     }
     g_repl_targets.push_back(fd);
+    g_repl_ack_offsets[fd] = g_master_repl_offset;
 }
 
 void replication_propagate(const RespValue& request) {
@@ -85,6 +102,7 @@ void replication_propagate(const RespValue& request) {
     {
         std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
         targets = g_repl_targets;
+        g_master_repl_offset += payload.size();
     }
     for (int repl_fd : targets) {
         (void)send_all(repl_fd, payload.data(), payload.size());
@@ -110,7 +128,20 @@ void handle_ping(int fd, const RespValue& request) {
 }
 
 void handle_replconf(int fd, const RespValue& request) {
-    (void)request;
+    if (request.elements.size() >= 3) {
+        std::string sub = request.elements[1].bulkString;
+        std::transform(sub.begin(), sub.end(), sub.begin(), ::toupper);
+        if (sub == "ACK") {
+            char* end = nullptr;
+            const long long ack = std::strtoll(request.elements[2].bulkString.c_str(), &end, 10);
+            if (end != request.elements[2].bulkString.c_str()) {
+                std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
+                g_repl_ack_offsets[fd] = static_cast<std::uint64_t>(std::max<long long>(0, ack));
+                g_repl_ack_cv.notify_all();
+            }
+            return;
+        }
+    }
     send(fd, "+OK\r\n", 5, 0);
 }
 
@@ -144,13 +175,60 @@ void handle_wait(int fd, const RespValue& request) {
         return;
     }
 
-    std::size_t replica_count = 0;
+    long long requested = 0;
+    long long timeout_ms = 0;
+    try {
+        requested = std::stoll(request.elements[1].bulkString);
+        timeout_ms = std::stoll(request.elements[2].bulkString);
+    } catch (...) {
+        const char* err = "-ERR value is not an integer or out of range\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+    if (requested < 0) requested = 0;
+    if (timeout_ms < 0) timeout_ms = 0;
+
+    const std::uint64_t target_offset = [&]() {
+        std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
+        return g_master_repl_offset;
+    }();
+
+    bool need_getack = false;
+    std::vector<int> targets;
     {
         std::lock_guard<std::mutex> lock(g_repl_targets_mutex);
-        replica_count = g_repl_targets.size();
+        need_getack = (target_offset > g_last_wait_offset);
+        targets = g_repl_targets;
     }
 
-    const std::string resp = ":" + std::to_string(replica_count) + "\r\n";
+    if (need_getack && !targets.empty()) {
+        static constexpr char kGetAck[] =
+            "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+        for (int repl_fd : targets) {
+            (void)send_all(repl_fd, kGetAck, sizeof(kGetAck) - 1);
+        }
+    }
+
+    std::unique_lock<std::mutex> lock(g_repl_targets_mutex);
+    auto enough_acked = [&]() {
+        return count_acked_replicas_locked(target_offset) >= static_cast<std::size_t>(requested);
+    };
+
+    if (!enough_acked()) {
+        if (timeout_ms == 0) {
+            g_repl_ack_cv.wait(lock, enough_acked);
+        } else {
+            g_repl_ack_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), enough_acked);
+        }
+    }
+
+    const std::size_t acked = count_acked_replicas_locked(target_offset);
+    if (target_offset > g_last_wait_offset) {
+        g_last_wait_offset = target_offset;
+    }
+    lock.unlock();
+
+    const std::string resp = ":" + std::to_string(acked) + "\r\n";
     send(fd, resp.c_str(), resp.size(), 0);
 }
 
@@ -809,6 +887,8 @@ void replication_unregister_replica(int client_fd) {
     g_repl_targets.erase(
         std::remove(g_repl_targets.begin(), g_repl_targets.end(), client_fd),
         g_repl_targets.end());
+    g_repl_ack_offsets.erase(client_fd);
+    g_repl_ack_cv.notify_all();
 }
 
 void execute_command(int client_fd, const RespValue& request) {
