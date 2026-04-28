@@ -80,4 +80,7 @@ void execute_command_for_exec(int client_fd, const RespValue& request);
 bool acl_default_user_is_nopass();
 bool acl_credentials_match(const std::string& username, const std::string& password);
 
+// After RDB load: replay the incremental AOF named in the manifest (type i).
+bool aof_replay_from_manifest(int resp_sink_fd);
+
 #endif // COMMANDS_H

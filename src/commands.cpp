@@ -18,6 +18,7 @@
 #include <fstream>
 #include <fcntl.h>
 #include <unistd.h>
+#include <iterator>
 #include "commands.h"
 #include "respparser.h" // Wherever your RespValue struct is
 #include "dataStructures.h" // Wherever your Node struct and key_value_store are
@@ -36,6 +37,40 @@ extern std::string server_appendonly;
 extern std::string server_appenddirname;
 extern std::string server_appendfilename;
 extern std::string server_appendfsync;
+
+// Suppress AOF writes and replication offset updates while replaying the AOF at startup.
+static bool g_aof_replay_mode = false;
+
+static bool aof_read_active_incremental_filename(std::string& out_file) {
+    const std::filesystem::path manifest_path =
+        std::filesystem::path(server_rdb_dir) /
+        server_appenddirname /
+        (server_appendfilename + ".manifest");
+
+    std::ifstream manifest(manifest_path);
+    if (!manifest.is_open()) {
+        return false;
+    }
+
+    std::string line;
+    std::string active_file;
+    while (std::getline(manifest, line)) {
+        std::istringstream iss(line);
+        std::string file_kw, file_name, seq_kw, seq_num, type_kw, type_val;
+        if (!(iss >> file_kw >> file_name >> seq_kw >> seq_num >> type_kw >> type_val)) {
+            continue;
+        }
+        if (file_kw == "file" && seq_kw == "seq" && type_kw == "type" && type_val == "i") {
+            active_file = file_name;
+        }
+    }
+
+    if (active_file.empty()) {
+        return false;
+    }
+    out_file = active_file;
+    return true;
+}
 
 namespace {
 
@@ -77,39 +112,23 @@ bool g_default_user_nopass = true;
 std::vector<std::string> g_default_user_password_hashes;
 std::mutex g_aof_mutex;
 
-bool aof_read_active_incremental_filename(std::string& out_file) {
-    const std::filesystem::path manifest_path =
-        std::filesystem::path(server_rdb_dir) /
-        server_appenddirname /
-        (server_appendfilename + ".manifest");
-
-    std::ifstream manifest(manifest_path);
-    if (!manifest.is_open()) {
-        return false;
-    }
-
-    std::string line;
-    std::string active_file;
-    while (std::getline(manifest, line)) {
-        std::istringstream iss(line);
-        std::string file_kw, file_name, seq_kw, seq_num, type_kw, type_val;
-        if (!(iss >> file_kw >> file_name >> seq_kw >> seq_num >> type_kw >> type_val)) {
-            continue;
-        }
-        if (file_kw == "file" && seq_kw == "seq" && type_kw == "type" && type_val == "i") {
-            active_file = file_name;
-        }
-    }
-
-    if (active_file.empty()) {
-        return false;
-    }
-    out_file = active_file;
-    return true;
-}
+// Same commands that change the dataset (used for replication); AOF must only log these.
+bool command_propagates_to_replicas(const std::string& cmd_upper);
 
 bool aof_append_command(const RespValue& request) {
+    if (g_aof_replay_mode) {
+        return true;
+    }
     if (server_appendonly != "yes") {
+        return true;
+    }
+
+    if (request.elements.empty()) {
+        return true;
+    }
+    std::string cmd_name = request.elements[0].bulkString;
+    std::transform(cmd_name.begin(), cmd_name.end(), cmd_name.begin(), ::toupper);
+    if (!command_propagates_to_replicas(cmd_name)) {
         return true;
     }
 
@@ -1584,7 +1603,7 @@ void execute_command(int client_fd, const RespValue& request) {
         if (cmd_name == "SET" || cmd_name == "RPUSH" || cmd_name == "LPUSH") {
             expiry_cv.notify_all(); // Notify after modifying data that BLPOP/XREAD might be waiting on
         }
-        if (!server_is_replica && command_propagates_to_replicas(cmd_name)) {
+        if (!server_is_replica && !g_aof_replay_mode && command_propagates_to_replicas(cmd_name)) {
             replication_propagate(request);
         }
     } else {
@@ -1665,5 +1684,49 @@ void execute_transaction_exec(int client_fd, std::vector<RespValue>& command_que
     for (const auto& cmd : pending) {
         execute_command_for_exec(client_fd, cmd);
     }
+}
+
+bool aof_replay_from_manifest(int resp_sink_fd) {
+    if (server_appendonly != "yes") {
+        return true;
+    }
+
+    std::string incr_name;
+    if (!aof_read_active_incremental_filename(incr_name)) {
+        return false;
+    }
+
+    const std::filesystem::path aof_path =
+        std::filesystem::path(server_rdb_dir) / server_appenddirname / incr_name;
+
+    std::ifstream in(aof_path, std::ios::binary);
+    if (!in.is_open()) {
+        return false;
+    }
+
+    std::string buf((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    const struct ReplayGuard {
+        ReplayGuard() { g_aof_replay_mode = true; }
+        ~ReplayGuard() { g_aof_replay_mode = false; }
+    } guard;
+
+    while (!buf.empty()) {
+        const std::size_t skip = buf.find_first_not_of(" \t\r\n");
+        if (skip == std::string::npos) {
+            break;
+        }
+        buf.erase(0, skip);
+
+        RespValue cmd;
+        std::size_t consumed = 0;
+        if (!RespParser::try_parse_complete_array(buf, cmd, consumed)) {
+            return false;
+        }
+        execute_command(resp_sink_fd, cmd);
+        buf.erase(0, consumed);
+    }
+
+    return true;
 }
 

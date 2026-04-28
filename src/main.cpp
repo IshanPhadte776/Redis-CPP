@@ -1129,43 +1129,53 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        const std::filesystem::path append_file_path =
-            append_dir_path / (server_appendfilename + ".1.incr.aof");
-        std::ofstream append_file(append_file_path, std::ios::app);
-        if (!append_file.is_open()) {
-            std::cerr << "error: failed to create appendonly file '"
-                      << append_file_path.string() << "'\n";
-            return 1;
-        }
-
         const std::filesystem::path manifest_path =
             append_dir_path / (server_appendfilename + ".manifest");
-        std::ofstream manifest_file(manifest_path, std::ios::trunc);
-        if (!manifest_file.is_open()) {
-            std::cerr << "error: failed to create appendonly manifest file '"
-                      << manifest_path.string() << "'\n";
-            return 1;
-        }
-        manifest_file << "file " << server_appendfilename
-                      << ".1.incr.aof seq 1 type i\n";
-        if (!manifest_file.good()) {
-            std::cerr << "error: failed writing appendonly manifest file '"
-                      << manifest_path.string() << "'\n";
-            return 1;
+        if (!std::filesystem::exists(manifest_path)) {
+            const std::filesystem::path append_file_path =
+                append_dir_path / (server_appendfilename + ".1.incr.aof");
+            std::ofstream append_file(append_file_path, std::ios::app);
+            if (!append_file.is_open()) {
+                std::cerr << "error: failed to create appendonly file '"
+                          << append_file_path.string() << "'\n";
+                return 1;
+            }
+
+            std::ofstream manifest_file(manifest_path, std::ios::trunc);
+            if (!manifest_file.is_open()) {
+                std::cerr << "error: failed to create appendonly manifest file '"
+                          << manifest_path.string() << "'\n";
+                return 1;
+            }
+            manifest_file << "file " << server_appendfilename
+                          << ".1.incr.aof seq 1 type i\n";
+            if (!manifest_file.good()) {
+                std::cerr << "error: failed writing appendonly manifest file '"
+                          << manifest_path.string() << "'\n";
+                return 1;
+            }
         }
     }
 
     std::cout << std::unitbuf;
+
+    g_resp_sink_fd = open("/dev/null", O_WRONLY);
+    if (g_resp_sink_fd < 0) {
+        std::cerr << "error: could not open /dev/null\n";
+        return 1;
+    }
 
     {
         std::lock_guard<std::mutex> lock(store_mutex);
         (void)rdb_load_from_file(server_rdb_dir + "/" + server_rdb_dbfilename);
     }
 
-    g_resp_sink_fd = open("/dev/null", O_WRONLY);
-    if (g_resp_sink_fd < 0) {
-        std::cerr << "error: could not open /dev/null\n";
-        return 1;
+    if (server_appendonly == "yes") {
+        if (!aof_replay_from_manifest(g_resp_sink_fd)) {
+            std::cerr << "error: failed to replay appendonly file (see manifest under "
+                      << server_rdb_dir << "/" << server_appenddirname << ")\n";
+            return 1;
+        }
     }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
