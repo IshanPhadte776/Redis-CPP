@@ -1,29 +1,33 @@
-#include <iostream>
-#include <cstdlib>
-#include <string>
-#include <cstring>
-#include <unistd.h>
-#include <fcntl.h>
-#include <thread>
-#include <mutex>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-#include <cstdint>
-#include <queue>
-#include <chrono>
-#include <algorithm>
-#include <filesystem>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <atomic>
-#include <fstream>
-#include "respparser.h"
-#include "dataStructures.h"
-#include "commands.h"
+// --- C++ standard library ---
+#include <iostream>        // std::cerr for replica/server diagnostics
+#include <cstdlib>         // std::strtoull (RESP bulk length parsing)
+#include <string>          // keys, pending buffers, RESP wire format
+#include <cstring>         // std::strcmp (CLI flags), strlen (C string sends)
+#include <thread>          // per-client, replica stream, background expiry worker
+#include <mutex>           // store, pub/sub, expiry heap synchronization
+#include <condition_variable>  // expiry thread waits until next TTL or shutdown
+#include <unordered_map>   // key store, pub/sub channel → subscribers / counts
+#include <unordered_set>   // pub/sub: client fd sets per channel
+#include <vector>          // RDB decode buffers; expiry heap backing storage
+#include <cstdint>         // fixed-width types (versions, ports, offsets)
+#include <queue>           // std::priority_queue for TTL expiry ordering
+#include <chrono>          // steady/system clocks, sleep_for, timed waits
+#include <algorithm>       // std::transform (case folding for commands / args)
+#include <filesystem>      // AOF dir creation, manifest / append paths
+#include <atomic>          // replica master fd and replication offset (cross-thread)
+#include <fstream>         // binary RDB read; AOF append / manifest writes
 
-#include <condition_variable>
+// --- POSIX / Berkeley sockets ---
+#include <unistd.h>        // close() on listening, client, and master sockets
+#include <fcntl.h>         // O_* / fcntl (POSIX descriptor control; typical with sockets)
+#include <sys/socket.h>    // socket, bind, listen, accept, send, recv, setsockopt
+#include <arpa/inet.h>     // htons and sockaddr_in helpers
+#include <netdb.h>         // getaddrinfo / freeaddrinfo for replica → master lookup
+
+// --- This executable’s modules ---
+#include "respparser.h"    // decode incoming RESP into commands
+#include "dataStructures.h" // Node, ExpiryEntry, store types shared with commands
+#include "commands.h"      // command execution and reply building
 
 
 // Map: Key Name -> Vector of Nodes
