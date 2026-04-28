@@ -2,10 +2,12 @@
 #ifndef DATA_STRUCTURES_H
 #define DATA_STRUCTURES_H
 
-#include <string>
-#include <vector>
-#include <variant>  // <--- ADD THIS: Required for std::variant
+#include <climits>
 #include <chrono>
+#include <string>
+#include <unordered_map>
+#include <variant>
+#include <vector>
 // ==========================================
 // 2. Data Structures & Global Store
 // ==========================================
