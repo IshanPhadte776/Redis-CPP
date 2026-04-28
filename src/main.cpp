@@ -1155,7 +1155,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-f1    std::cout << std::unitbuf;
+    std::cout << std::unitbuf;
 
     {
         std::lock_guard<std::mutex> lock(store_mutex);
