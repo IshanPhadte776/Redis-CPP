@@ -13,6 +13,7 @@
 #include <queue>
 #include <chrono>
 #include <algorithm>
+#include <filesystem>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -1115,6 +1116,18 @@ int main(int argc, char* argv[]) {
     if (server_is_replica && (replica_master_host.empty() || replica_master_port == 0)) {
         std::cerr << "error: --replicaof requires host and port\n";
         return 1;
+    }
+
+    if (server_appendonly == "yes") {
+        std::error_code ec;
+        const std::filesystem::path append_dir_path =
+            std::filesystem::path(server_rdb_dir) / server_appenddirname;
+        std::filesystem::create_directories(append_dir_path, ec);
+        if (ec) {
+            std::cerr << "error: failed to create appendonly directory '"
+                      << append_dir_path.string() << "': " << ec.message() << "\n";
+            return 1;
+        }
     }
 
     std::cout << std::unitbuf;
