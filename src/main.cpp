@@ -1128,6 +1128,15 @@ int main(int argc, char* argv[]) {
                       << append_dir_path.string() << "': " << ec.message() << "\n";
             return 1;
         }
+
+        const std::filesystem::path append_file_path =
+            append_dir_path / (server_appendfilename + ".1.incr.aof");
+        std::ofstream append_file(append_file_path, std::ios::app);
+        if (!append_file.is_open()) {
+            std::cerr << "error: failed to create appendonly file '"
+                      << append_file_path.string() << "'\n";
+            return 1;
+        }
     }
 
     std::cout << std::unitbuf;
