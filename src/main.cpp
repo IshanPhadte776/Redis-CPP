@@ -1137,9 +1137,25 @@ int main(int argc, char* argv[]) {
                       << append_file_path.string() << "'\n";
             return 1;
         }
+
+        const std::filesystem::path manifest_path =
+            append_dir_path / (server_appendfilename + ".manifest");
+        std::ofstream manifest_file(manifest_path, std::ios::trunc);
+        if (!manifest_file.is_open()) {
+            std::cerr << "error: failed to create appendonly manifest file '"
+                      << manifest_path.string() << "'\n";
+            return 1;
+        }
+        manifest_file << "file " << server_appendfilename
+                      << ".1.incr.aof seq 1 type i\n";
+        if (!manifest_file.good()) {
+            std::cerr << "error: failed writing appendonly manifest file '"
+                      << manifest_path.string() << "'\n";
+            return 1;
+        }
     }
 
-    std::cout << std::unitbuf;
+f1    std::cout << std::unitbuf;
 
     {
         std::lock_guard<std::mutex> lock(store_mutex);
