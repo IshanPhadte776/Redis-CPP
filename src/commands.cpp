@@ -14,6 +14,10 @@
 #include <sstream>
 #include <iomanip>
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <fcntl.h>
+#include <unistd.h>
 #include "commands.h"
 #include "respparser.h" // Wherever your RespValue struct is
 #include "dataStructures.h" // Wherever your Node struct and key_value_store are
@@ -71,6 +75,86 @@ std::uint64_t g_last_wait_offset = 0;
 std::mutex g_acl_mutex;
 bool g_default_user_nopass = true;
 std::vector<std::string> g_default_user_password_hashes;
+std::mutex g_aof_mutex;
+
+bool aof_read_active_incremental_filename(std::string& out_file) {
+    const std::filesystem::path manifest_path =
+        std::filesystem::path(server_rdb_dir) /
+        server_appenddirname /
+        (server_appendfilename + ".manifest");
+
+    std::ifstream manifest(manifest_path);
+    if (!manifest.is_open()) {
+        return false;
+    }
+
+    std::string line;
+    std::string active_file;
+    while (std::getline(manifest, line)) {
+        std::istringstream iss(line);
+        std::string file_kw, file_name, seq_kw, seq_num, type_kw, type_val;
+        if (!(iss >> file_kw >> file_name >> seq_kw >> seq_num >> type_kw >> type_val)) {
+            continue;
+        }
+        if (file_kw == "file" && seq_kw == "seq" && type_kw == "type" && type_val == "i") {
+            active_file = file_name;
+        }
+    }
+
+    if (active_file.empty()) {
+        return false;
+    }
+    out_file = active_file;
+    return true;
+}
+
+bool aof_append_command(const RespValue& request) {
+    if (server_appendonly != "yes") {
+        return true;
+    }
+
+    const std::string payload = RespParser::serialize_array(request);
+    if (payload.empty()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_aof_mutex);
+
+    std::string active_file;
+    if (!aof_read_active_incremental_filename(active_file)) {
+        return false;
+    }
+
+    const std::filesystem::path aof_path =
+        std::filesystem::path(server_rdb_dir) /
+        server_appenddirname /
+        active_file;
+
+    const int fd = open(aof_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        return false;
+    }
+
+    std::size_t written = 0;
+    while (written < payload.size()) {
+        const ssize_t n = write(fd, payload.data() + written, payload.size() - written);
+        if (n <= 0) {
+            close(fd);
+            return false;
+        }
+        written += static_cast<std::size_t>(n);
+    }
+
+    if (server_appendfsync == "always") {
+        if (fsync(fd) != 0) {
+            close(fd);
+            return false;
+        }
+    }
+
+    close(fd);
+    return true;
+}
 
 inline std::uint32_t rotr32(std::uint32_t x, int n) {
     return (x >> n) | (x << (32 - n));
@@ -417,6 +501,13 @@ void handle_set(int fd, const RespValue& request) {
             expiry_heap.push({key, n.expires_at});
         }
     }
+
+    if (!aof_append_command(request)) {
+        const char* err = "-ERR failed to append to AOF\r\n";
+        send(fd, err, strlen(err), 0);
+        return;
+    }
+
     send(fd, "+OK\r\n", 5, 0);
 }
 
